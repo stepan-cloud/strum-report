@@ -1,0 +1,911 @@
+/*
+ * Струм CRM — окно сверки отчёта водителя.
+ * Для расширения "User JavaScript and CSS", правило для сайта: strum-crm.onrender.com
+ *
+ * Данные отчёта приходят из ссылки в Telegram:
+ *   https://strum-crm.onrender.com/?fio=...&pts=7&ns=3,6&nl=5&km=312&byn=1500&cm=...#route/4521
+ */
+(function () {
+  'use strict';
+  // Не запускать второй раз (например, если в расширении остался и старый код, и загрузчик)
+  if (document.documentElement.dataset.strumReport) return;
+  document.documentElement.dataset.strumReport = '1';
+
+  // =====================================================================
+  // 1. НАСТРОЙКА ПОД CRM
+  //    Здесь код, который читает данные со страницы маршрута и меняет их.
+  //    Пока это заглушки: подключу, когда будет разметка страницы CRM.
+  //    Каждая функция чтения возвращает null, если данных нет.
+  // =====================================================================
+  // Поля страницы рейса ищем по их подсказкам (placeholder / title)
+  const byName = (tag, name) =>
+    document.querySelector(`${tag}[title="${name}"], ${tag}[aria-label="${name}"]`);
+  const kmInput = () => document.querySelector('input[placeholder="км"]');
+  const driverInput = () => document.querySelector('input[placeholder="фамилия"]');
+  const STATUS_SELECT = 'select[title="Сменить статус заказа"], select[aria-label="Сменить статус заказа"]';
+  const ORDER_INPUT = 'input[title="Порядок объезда"], input[aria-label="Порядок объезда"]';
+
+  // Текст статуса в CRM → код окна
+  const CRM_STATUS = { 'Сдан': 'ok', 'Не сдан': 'ns', 'Не загружен': 'nl' };
+  const CRM_TEXT = { ok: 'Сдан', ns: 'Не сдан', nl: 'Не загружен' };
+
+  /** ID заказа в строке: <td class="code"><b>003149</b>, запасной вариант — ссылка #order/3149 */
+  function orderId(tr) {
+    if (!tr) return null;
+    const b = tr.querySelector('td.code b');
+    let id = b && /^\d+$/.test(b.textContent.trim()) ? b.textContent.trim() : null;
+    if (!id) {
+      const a = tr.querySelector('a[href^="#order/"]');
+      const m = a && a.getAttribute('href').match(/^#order\/(\d+)/);
+      id = m ? m[1] : null;
+    }
+    return id ? id.padStart(6, '0') : null;
+  }
+
+  /** Строки таблицы «Заказы в рейсе», по порядку объезда */
+  function crmRows() {
+    const rows = [...document.querySelectorAll(STATUS_SELECT)].map((sel, i) => {
+      const tr = sel.closest('tr');
+      const ord = tr && tr.querySelector(ORDER_INPUT);
+      const n = ord ? parseInt(ord.value, 10) : NaN;
+      const text = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text.trim() : '';
+      return { num: isNaN(n) ? i + 1 : n, id: orderId(tr), tr, select: sel, statusText: text, status: CRM_STATUS[text] || '' };
+    });
+    return rows.sort((a, b) => a.num - b.num);
+  }
+
+  /** Ждать, пока check() вернёт не пустое значение; по таймауту — ошибка с текстом msg */
+  function waitFor(check, timeoutMs, msg) {
+    return new Promise((resolve, reject) => {
+      const t0 = Date.now();
+      const timer = setInterval(() => {
+        let v = null;
+        try { v = check(); } catch (e) { /* страница ещё перерисовывается */ }
+        if (v) { clearInterval(timer); resolve(v); }
+        else if (Date.now() - t0 > timeoutMs) { clearInterval(timer); reject(new Error(msg)); }
+      }, 100);
+    });
+  }
+
+  /** Записать значение в поле так, чтобы страница это заметила */
+  function setFieldValue(input, value) {
+    const proto = input.tagName === 'SELECT' ? HTMLSelectElement.prototype
+      : input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  const CRM = {
+    /** ФИО водителя (в CRM — только фамилия) */
+    getDriverName() {
+      const i = driverInput();
+      return i && i.value.trim() ? i.value.trim() : null;
+    },
+
+    /** Тип рейса: select#rt_rtype → { value: 'minsk' | 'intercity' | ... | '', text: 'Минск' } */
+    getRouteType() {
+      const s = document.getElementById('rt_rtype');
+      if (!s) return null;
+      const o = s.options[s.selectedIndex];
+      return { value: s.value, text: o ? o.text.trim() : '' };
+    },
+
+    /** Длина маршрута, км */
+    getKm() {
+      const i = kmInput();
+      return i && i.value.trim() !== '' ? num(i.value) : null;
+    },
+
+    /** Точки: [{ num, id: '003149', status: 'ok' | 'ns' | 'nl' | '' }] */
+    getPoints() {
+      const rows = crmRows();
+      return rows.length ? rows.map(r => ({ num: r.num, id: r.id, status: r.status })) : null;
+    },
+
+    /** Суммы из блока «Принято»: «Наличные: BYN 10 257» */
+    getMoney() {
+      const el = [...document.querySelectorAll('main div, main span')]
+        .find(e => e.children.length <= 3 && /^\s*Наличные:/.test(e.textContent) && e.textContent.length < 200);
+      if (!el) return null;
+      const money = {};
+      const re = /(BYN|USD|EUR|RUB)\s*([\d\s .,]+)/g;
+      let m;
+      while ((m = re.exec(el.textContent))) money[m[1]] = num(m[2]);
+      return money;
+    },
+
+    /** Проставить статусы точек по отчёту (с подтверждением) */
+    applyStatuses(rep) {
+      const rows = crmRows();
+      if (!rows.length) return alert('Не нашёл точки на странице.');
+
+      // Какой статус должен быть у каждой точки отчёта
+      const want = [];
+      for (let n = 1; n <= rep.total; n++)
+        want.push({ repNum: n, status: rep.nl.includes(n) ? 'nl' : rep.ns.includes(n) ? 'ns' : 'ok' });
+
+      let pairs;
+      if (rows.length === want.length) {
+        pairs = want.map((w, i) => ({ ...w, row: rows[i] }));
+      } else if (rows.length === want.length - rep.nl.length) {
+        // Незагруженные убраны из маршрута — сопоставляем оставшиеся по порядку
+        const left = want.filter(w => w.status !== 'nl');
+        pairs = left.map((w, i) => ({ ...w, row: rows[i] }));
+      } else {
+        return alert(`Количество точек не сходится (CRM ${rows.length}, отчёт ${rep.total}) — статусы не проставляю.`);
+      }
+
+      const changes = pairs.filter(p => p.row.status !== p.status);
+      if (!changes.length) return alert('Все статусы уже совпадают с отчётом.');
+
+      const list = changes.map(p =>
+        `Точка ${p.row.num} (отчёт ${p.repNum}т): ${p.row.statusText || '—'} → ${CRM_TEXT[p.status]}`).join('\n');
+      if (!confirm(`Проставить статусы?\n\n${list}`)) return;
+
+      changes.forEach(p => {
+        const opt = [...p.row.select.options].find(o => o.text.trim() === CRM_TEXT[p.status]);
+        if (opt) setFieldValue(p.row.select, opt.value);
+      });
+    },
+
+    /**
+     * Изменить «Пометку к заказу» и сохранить: жмём ✏️ «Поправить пометку к заказу» в строке заказа,
+     * ждём окно CRM и текущую пометку, ставим transform(текущая), жмём «Сохранить», ждём закрытия окна.
+     * Если пометка в строке не пустая, а в окне так и не появилась — ничего не сохраняем
+     * (иначе можно затереть пометку).
+     * → Promise<{ changed, before, after }>
+     */
+    async editOrderNote(id, transform) {
+      const row = crmRows().find(r => r.id && normId(r.id) === normId(id));
+      if (!row) throw new Error(`Не нашёл заказ ${id} в рейсе.`);
+      const pencil = row.tr.querySelector('button[title="Поправить пометку к заказу"]');
+      if (!pencil) throw new Error(`Не нашёл кнопку «Поправить пометку к заказу» у заказа ${id}.`);
+      const noteDiv = pencil.parentElement && [...pencil.parentElement.children].find(e => e.tagName === 'DIV');
+      const rowHasNote = !!(noteDiv && noteDiv.textContent.trim());
+
+      pencil.click();
+      const idRe = new RegExp(`(^|\\D)0*${normId(id)}(\\D|$)`);
+      const t0 = Date.now();
+      const ta = await waitFor(() => {
+        const dlg = document.querySelector('#modal.on');
+        const t = dlg && dlg.querySelector('#rt_note_txt');
+        const ttl = dlg && dlg.querySelector('#dlg-ttl');
+        if (!t || (ttl && !idRe.test(ttl.textContent))) return null;
+        // ждём, пока CRM подставит текущую пометку
+        if (rowHasNote ? !t.value.trim() : Date.now() - t0 < 300) return null;
+        return t;
+      }, 5000, 'Окно «Пометка к заказу» не открылось или пометка не подгрузилась — ничего не сохранял.');
+
+      const dlg = ta.closest('#modal') || document.querySelector('#modal.on');
+      const btn = name => [...dlg.querySelectorAll('button')].find(b => b.textContent.trim() === name);
+      const before = ta.value;
+      const after = transform(before);
+      if (after === before) {
+        const cancel = btn('Отмена');
+        if (cancel) cancel.click();
+        return { changed: false, before, after };
+      }
+      const save = btn('Сохранить');
+      if (!save) throw new Error('Не нашёл кнопку «Сохранить» в окне пометки — ничего не сохранял.');
+      setFieldValue(ta, after);
+      save.click();
+      await waitFor(() => !document.querySelector('#modal.on'), 8000,
+        'После «Сохранить» окно пометки не закрылось — проверьте пометку вручную.');
+      return { changed: true, before, after };
+    },
+
+    /** Вписать километраж из отчёта (с подтверждением) */
+    applyKm(km) {
+      const i = kmInput();
+      if (!i) return alert('Не нашёл поле «Длина маршрута».');
+      if (km === null) return alert('В отчёте нет километража.');
+      if (num(i.value) === km) return alert('Километраж уже совпадает.');
+      if (!confirm(`Длина маршрута: ${i.value || '—'} → ${km}?`)) return;
+      i.focus();
+      setFieldValue(i, String(km));
+      i.blur();
+      i.scrollIntoView({ block: 'center' });
+      i.style.outline = '3px solid #f5b400';
+      setTimeout(() => { i.style.outline = ''; }, 4000);
+    },
+  };
+
+  // =====================================================================
+  // 2. НАСТРОЙКИ ОКНА
+  // =====================================================================
+  const CURRENCIES = ['BYN', 'USD', 'EUR', 'RUB'];
+  // Допуск по километражу по типу рейса (select#rt_rtype): pct% от км в CRM + km
+  const KM_TOLERANCE = {
+    intercity: { pct: 5, km: 0 },   // Межгород — 5%
+    minsk:     { pct: 5, km: 20 },  // Минск — 5% + 20 км
+  };
+  // Других типов быть не должно: для них (и для «не задан») результат красный
+  const REFRESH_MS = 1500;         // как часто перечитывать CRM
+  const STORE = 'strumReport:';    // ключ для правок отчёта
+
+  // =====================================================================
+  // 3. ДАННЫЕ ОТЧЁТА ИЗ ССЫЛКИ
+  // =====================================================================
+  const params = new URLSearchParams(location.search);
+  if (!params.has('pts') && !params.has('fio') && !params.has('km')) return; // ссылка не из отчёта
+
+  const routeIdFromHash = () => {
+    const m = location.hash.match(/route\/([^/?&]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  };
+  const ROUTE_ID = routeIdFromHash();
+
+  const nums = s => (s || '').split(',').map(x => parseInt(x, 10)).filter(n => !isNaN(n)).sort((a, b) => a - b);
+  const num = v => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = parseFloat(String(v).replace(/\s/g, '').replace(',', '.'));
+    return isNaN(n) ? null : n;
+  };
+
+  const originalReport = {
+    fio: (params.get('fio') || '').trim().split(/\s+/)[0], // только фамилия
+    km: params.get('km') || '',
+    pts: params.get('pts') || '',
+    ns: params.get('ns') || '',
+    nl: params.get('nl') || '',
+    cm: params.get('cm') || '',
+  };
+  CURRENCIES.forEach(c => { originalReport[c] = params.get(c.toLowerCase()) || ''; });
+
+  // Правки хранятся только для этой конкретной ссылки: новый отчёт — чистые данные
+  const STORE_KEY = STORE + ROUTE_ID + ':' + location.search;
+  let report = loadReport() || { ...originalReport };
+
+  function loadReport() {
+    try { const s = localStorage.getItem(STORE_KEY); return s ? JSON.parse(s) : null; }
+    catch (e) { return null; }
+  }
+  function saveReport() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(report)); } catch (e) {}
+  }
+  function resetReport() {
+    try { localStorage.removeItem(STORE_KEY); } catch (e) {}
+    report = { ...originalReport };
+  }
+
+  // =====================================================================
+  // 4. СРАВНЕНИЕ
+  //    Результат: { level: 'ok' | 'warn' | 'bad' | 'none', text: '...' }
+  // =====================================================================
+  const OK = t => ({ level: 'ok', text: t });
+  const WARN = t => ({ level: 'warn', text: t });
+  const BAD = t => ({ level: 'bad', text: t });
+  const NONE = t => ({ level: 'none', text: t || 'Нет данных' });
+
+  const normName = s => (s || '').trim().split(/\s+/)[0].toLowerCase().replace(/ё/g, 'е');
+
+  function levenshtein(a, b) {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+    for (let j = 1; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++)
+      for (let j = 1; j <= b.length; j++)
+        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1,
+          d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    return d[a.length][b.length];
+  }
+
+  function compareName(crm, rep) {
+    if (!crm) return NONE('Нет ФИО в CRM');
+    if (!rep) return WARN('В отчёте нет ФИО');
+    const a = normName(crm), b = normName(rep);
+    if (a === b) return OK('Совпадает');
+    const dist = levenshtein(a, b);
+    const allowed = Math.max(a.length, b.length) >= 7 ? 2 : 1;
+    if (dist <= allowed) return WARN(`Возможна опечатка (${dist} симв.)`);
+    return BAD('Разные водители');
+  }
+
+  /** Допуск по типу рейса: в пределах — зелёный, больше — красный */
+  function compareKm(crm, rep, type) {
+    const c = num(crm), r = num(rep);
+    if (c === null) return NONE('Нет км в CRM');
+    if (r === null) return WARN('В отчёте нет км');
+    const diff = r - c;
+    const pct = c !== 0 ? Math.abs(diff) / c * 100 : 100;
+    const d = `${diff > 0 ? '+' : ''}${round(diff)} км (${round(pct)}%)`;
+
+    // Допуск есть только у Минска и Межгорода; любой другой тип — ошибка в CRM
+    const t = type && KM_TOLERANCE[type.value];
+    if (!t) {
+      const what = !type ? 'Не нашёл тип рейса на странице'
+        : type.value ? `Тип рейса «${type.text}» — должен быть Минск или Межгород`
+        : 'Тип рейса не задан — должен быть Минск или Межгород';
+      return BAD(c === r ? `${what}; км совпадают` : `${what}; разница ${d}`);
+    }
+    if (c === r) return OK('Совпадает');
+
+    const tol = round(c * t.pct / 100 + t.km);
+    const rule = `${type.text}: ${t.pct}%${t.km ? ` + ${t.km} км` : ''} = ${tol} км`;
+    return Math.abs(diff) <= tol
+      ? OK(`В допуске: ${d} — допуск ${rule}`)
+      : BAD(`Расхождение ${d} — допуск ${rule}`);
+  }
+
+  /** Точки, не сданные и не загруженные — одна связанная проверка */
+  function comparePoints(crmPoints, rep) {
+    if (!crmPoints) return NONE('Нет точек в CRM');
+    const r = { total: num(rep.pts) || 0, ns: nums(rep.ns), nl: nums(rep.nl) };
+    const c = {
+      total: crmPoints.length,
+      ns: crmPoints.filter(p => p.status === 'ns').map(p => p.num).sort((a, b) => a - b),
+      nl: crmPoints.filter(p => p.status === 'nl').map(p => p.num).sort((a, b) => a - b),
+    };
+    const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+    const noStatuses = c.ns.length === 0 && c.nl.length === 0;
+
+    // Количество точек совпадает — сверяем номера
+    if (c.total === r.total) {
+      if (same(c.ns, r.ns) && same(c.nl, r.nl)) return OK('Совпадает');
+      if (noStatuses) return WARN('Статусы не проставлены — нажмите «Статус»');
+      const msgs = [];
+      if (!same(c.ns, r.ns)) msgs.push(`Не сданы: CRM ${listT(c.ns)}, отчёт ${listT(r.ns)}`);
+      if (!same(c.nl, r.nl)) msgs.push(`Не загружены: CRM ${listT(c.nl)}, отчёт ${listT(r.nl)}`);
+      return BAD(msgs.join('; '));
+    }
+
+    // В CRM меньше точек ровно на число незагруженных — их убрали из маршрута
+    if (r.nl.length && c.total === r.total - r.nl.length && c.nl.length === 0) {
+      const removed = `Незагруженные (${listT(r.nl)}) убраны из маршрута`;
+      if (c.ns.length === r.ns.length) return OK(`${removed} — сходится`);
+      if (c.ns.length === 0) return WARN(`${removed}; «не сдан» не проставлены — нажмите «Статус»`);
+      return WARN(`${removed}; несданных: CRM ${c.ns.length}, отчёт ${r.ns.length}`);
+    }
+
+    return BAD(`Количество точек: CRM ${c.total}, отчёт ${r.total}`);
+  }
+
+  function compareMoney(cur, crmMoney, rep) {
+    const c = crmMoney ? num(crmMoney[cur]) : null;
+    const r = num(rep);
+    if (crmMoney === null) return NONE('Нет сумм в CRM');
+    if (c === null) return WARN('В CRM нет этой валюты');
+    if (r === null) return WARN('В отчёте не указано');
+    if (Math.abs(c - r) < 0.005) return OK('Совпадает');
+    const diff = r - c;
+    // find — что искать на странице по клику (без знака)
+    return { ...BAD(`Расхождение ${diff > 0 ? '+' : ''}${round(diff)} ${cur}`), find: Math.abs(round(diff)) };
+  }
+
+  // =====================================================================
+  // ПОИСК ЧИСЛА НА СТРАНИЦЕ (как Ctrl+F)
+  //   Подсвечивает все места, где на странице стоит это число (со знаком или без),
+  //   каждое следующее нажатие — к следующему. Esc — снять подсветку.
+  //   CRM пишет тысячи отдельным span: «1<span>015</span>» — склеиваем текст внутри
+  //   одного блока, а между блоками и через <br> ставим разделитель.
+  // =====================================================================
+  const NUM_RE = /\d{1,3}(?:[    ]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?/g;
+  const numVal = s => parseFloat(s.replace(/[    ]/g, '').replace(',', '.'));
+  const findState = { value: null, idx: -1 };
+
+  /** Видимый текст страницы (без окна сверки) + где какой текстовый узел */
+  function pageText() {
+    const blockCache = new Map();
+    const isBlock = e => {
+      if (!blockCache.has(e)) blockCache.set(e, !/^inline/.test(getComputedStyle(e).display));
+      return blockCache.get(e);
+    };
+    const blockOf = n => { let e = n.parentElement; while (e && e !== document.body && !isBlock(e)) e = e.parentElement; return e; };
+
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+      acceptNode(n) {
+        if (n.nodeType === 1) return n.matches('#srp, script, style, noscript, textarea, select, template')
+          ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+        const p = n.parentElement;
+        return p && n.nodeValue.trim() && p.getClientRects().length ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      },
+    });
+    let text = '', segs = [], prevBlock = null, brSeen = false, n;
+    while ((n = walker.nextNode())) {
+      if (n.nodeType === 1) { if (n.tagName === 'BR') brSeen = true; continue; }
+      const b = blockOf(n);
+      if (segs.length && (b !== prevBlock || brSeen)) text += '\n';
+      segs.push({ node: n, start: text.length });
+      text += n.nodeValue;
+      prevBlock = b; brSeen = false;
+    }
+    return { text, segs };
+  }
+
+  /** Позиция в склеенном тексте → Range */
+  function makeRange(segs, from, to) {
+    const at = (pos, end) => {
+      let i = segs.length - 1;
+      while (i > 0 && (end ? segs[i].start >= pos : segs[i].start > pos)) i--;
+      return { node: segs[i].node, offset: pos - segs[i].start };
+    };
+    const a = at(from, false), b = at(to, true);
+    const r = document.createRange();
+    r.setStart(a.node, Math.min(a.offset, a.node.length));
+    r.setEnd(b.node, Math.min(b.offset, b.node.length));
+    return r;
+  }
+
+  function findRanges(value) {
+    const { text, segs } = pageText();
+    const same = s => Math.abs(numVal(s) - value) < 0.005;
+    const out = [];
+    let m;
+    NUM_RE.lastIndex = 0;
+    while ((m = NUM_RE.exec(text))) {
+      if (same(m[0])) { out.push(makeRange(segs, m.index, m.index + m[0].length)); continue; }
+      // «100 200» могло оказаться двумя числами — проверяем части
+      if (/[    ]/.test(m[0])) {
+        const re = /\d+(?:[.,]\d+)?/g;
+        let p;
+        while ((p = re.exec(m[0]))) {
+          if (!/^0\d/.test(p[0]) && same(p[0]))
+            out.push(makeRange(segs, m.index + p.index, m.index + p.index + p[0].length));
+        }
+      }
+    }
+    return out;
+  }
+
+  function findOnPage(value, label) {
+    const ranges = findRanges(value);
+    if (!ranges.length) { clearFind(); return showToast(`${label}: на странице не найдено`); }
+    findState.idx = findState.value === value ? (findState.idx + 1) % ranges.length : 0;
+    findState.value = value;
+    const cur = ranges[findState.idx];
+    if (window.CSS && CSS.highlights && window.Highlight) {
+      CSS.highlights.set('srp-find', new Highlight(...ranges));
+      CSS.highlights.set('srp-find-cur', new Highlight(cur));
+    }
+    const e = cur.startContainer.parentElement;
+    if (e) {
+      e.scrollIntoView({ block: 'center' });  // сразу, как Ctrl+F (плавная прокрутка сбивается при частых кликах)
+      if (!(window.CSS && CSS.highlights)) {  // старый браузер — хотя бы рамка
+        e.style.outline = '3px solid #f97316';
+        setTimeout(() => { e.style.outline = ''; }, 2000);
+      }
+    }
+    showToast(`${label}: ${findState.idx + 1} из ${ranges.length}`);
+  }
+
+  function clearFind() {
+    findState.value = null; findState.idx = -1;
+    if (window.CSS && CSS.highlights) { CSS.highlights.delete('srp-find'); CSS.highlights.delete('srp-find-cur'); }
+  }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && findState.value !== null) clearFind(); });
+
+  const round = n => Math.round(n * 100) / 100;
+  const listT = arr => arr.length ? arr.map(n => n + 'т').join(', ') : '—';
+
+  // =====================================================================
+  // РАЗБОР КОММЕНТАРИЯ ВОДИТЕЛЯ
+  //   Текст до первого обозначения точки — общий комментарий к маршруту.
+  //   Дальше каждый кусок относится к точке, обозначенной перед ним:
+  //   «1.», «1)», «1 -», «1т», «1 точка», «На 1 точке», «1-я точка», «1я»,
+  //   «Точка 1», «Адрес № 7», «№7», «ID 004376», «004376» (6 цифр = ID точки),
+  //   «1 точка (004376)». Номер точки — от 1 до 30.
+  //   «1т, 3т - закрыто» — один комментарий на обе точки.
+  // =====================================================================
+  const N = String.raw`(?<!\d)([1-9]|[12]\d|30)(?!\d)`;
+  const COMMENT_MARKERS = [
+    // «1т», «1 т.», «1 точка», «1-я точка», «на 1 точке», «1я точка маршрута»
+    { re: String.raw`(?:(?<!\p{L})(?:на|в)\s+)?${N}\s*(?:-?\s*(?:я|ая|ой|й)\s*)?(?:точк\p{L}*|т\.?)(?!\p{L})(?:\s+маршрута)?`, num: 1 },
+    // «Точка 1», «Адрес № 7», «т.1», «№7»
+    { re: String.raw`(?:(?<!\p{L})(?:точк\p{L}*|адрес\p{L}*|т\.)\s*(?:№\s*)?|№\s*)${N}`, num: 1 },
+    // «1я», «1-я», «2-ой»
+    { re: String.raw`${N}-?(?:я|ая|ой)(?!\p{L})`, num: 1 },
+    // в начале строки или после конца предложения: «1.», «1)», «1 -», «1:»
+    { re: String.raw`(?<=(?:^|[\n.;!?])\s*)${N}(?:\s*[.)](?!\d)|\s*[-–—:])`, num: 1 },
+    // «ID 004376», «004376»
+    { re: String.raw`(?:(?<!\p{L})(?:id|ид)\s*[:№]?\s*)?(?<!\d)(\d{6})(?!\d)`, id: 1 },
+  ].map(m => ({ ...m, re: new RegExp(m.re, 'giu') }));
+
+  const SEP_ONLY = /^[\s\-–—:.,;()]*$/;
+
+  /** → { general: '...', points: [{ num, id, text }] } */
+  function parseComment(text) {
+    text = (text || '').replace(/\r/g, '');
+    // Все обозначения точек с их позициями
+    const found = [];
+    COMMENT_MARKERS.forEach(m => {
+      m.re.lastIndex = 0;
+      let x;
+      while ((x = m.re.exec(text))) {
+        found.push({
+          start: x.index, end: x.index + x[0].length,
+          num: m.num ? parseInt(x[m.num], 10) : null,
+          id: m.id ? x[m.id] : null,
+        });
+      }
+    });
+    // Пересекающиеся: оставляем то, что начинается раньше, при равенстве — длиннее
+    found.sort((a, b) => a.start - b.start || b.end - a.end);
+    const marks = [];
+    found.forEach(f => { if (!marks.length || f.start >= marks[marks.length - 1].end) marks.push(f); });
+
+    // Обозначения подряд (между ними только знаки) — одна группа:
+    // «1 точка (004376)» → номер + ID одной точки; «1т, 3т» → две точки с общим текстом
+    const groups = [];
+    marks.forEach(m => {
+      const g = groups[groups.length - 1];
+      if (g && SEP_ONLY.test(text.slice(g.end, m.start))) {
+        const p = g.points[g.points.length - 1];
+        if (m.num !== null && p.num === null && m.id === null) p.num = m.num;
+        else if (m.id !== null && p.id === null && m.num === null) p.id = m.id;
+        else g.points.push({ num: m.num, id: m.id });
+        g.end = m.end;
+      } else {
+        groups.push({ start: m.start, end: m.end, points: [{ num: m.num, id: m.id }] });
+      }
+    });
+
+    const clean = s => s.replace(/^[\s\-–—:.,;)]+/, '').replace(/[\s\-–—,;(]+$/, '').trim();
+    const general = clean(text.slice(0, groups.length ? groups[0].start : text.length));
+    const points = [];
+    groups.forEach((g, i) => {
+      const t = clean(text.slice(g.end, i + 1 < groups.length ? groups[i + 1].start : text.length));
+      g.points.forEach(p => points.push({ num: p.num, id: p.id, text: t }));
+    });
+    return { general, points };
+  }
+
+  const normId = id => String(parseInt(id, 10));
+
+  /**
+   * Номер точки в отчёте ↔ ID заказа в CRM.
+   * Пары — как у кнопки «Статус»: если точек поровну — по порядку; если в CRM меньше
+   * ровно на незагруженные — оставшиеся точки отчёта по порядку; иначе — по «Порядку объезда».
+   */
+  function pointIdMap(crmPoints, rep) {
+    const idByNum = new Map(), numById = new Map();
+    if (!crmPoints) return { idByNum, numById };
+    const total = num(rep.pts) || 0, nl = nums(rep.nl);
+    let repNums;
+    if (crmPoints.length === total) repNums = crmPoints.map((_, i) => i + 1);
+    else if (nl.length && crmPoints.length === total - nl.length)
+      repNums = Array.from({ length: total }, (_, i) => i + 1).filter(n => !nl.includes(n));
+    else repNums = crmPoints.map(p => p.num);
+    crmPoints.forEach((p, i) => {
+      if (!p.id) return;
+      idByNum.set(repNums[i], p.id);
+      numById.set(normId(p.id), repNums[i]);
+    });
+    return { idByNum, numById };
+  }
+
+  /**
+   * Строка таблицы комментариев: недостающий номер / ID берём из CRM,
+   * если водитель указал оба и они не сходятся с CRM — предупреждение.
+   */
+  function commentPointRow(p, map) {
+    const fromCrm = v => el('span', { class: 'srp-sub', title: 'Взято из CRM' }, v);
+    const crmNum = p.id !== null ? map.numById.get(normId(p.id)) : undefined;
+    const crmId = p.num !== null ? map.idByNum.get(p.num) : undefined;
+
+    let numCell = p.num !== null ? p.num + 'т' : crmNum !== undefined ? fromCrm(crmNum + 'т') : '—';
+    let idCell = p.id !== null ? p.id : crmId ? fromCrm(crmId) : '—';
+    let warn = '';
+    if (p.id !== null && map.numById.size && crmNum === undefined) warn = `Заказа ${p.id} нет в рейсе`;
+    else if (p.num !== null && crmNum !== undefined && crmNum !== p.num) warn = `В CRM ${p.id} — это ${crmNum}т`;
+
+    // Заказ для кнопки «в пометку»: ID водителя, иначе ID из CRM по номеру
+    const targetId = p.id !== null ? p.id : crmId || null;
+    const canWrite = !!(targetId && p.text && map.numById.has(normId(targetId)));
+    const key = canWrite ? noteKey(targetId, p.text) : null;
+    const done = key && loadJson(key);   // уже вписан → кнопка «вернуть как было»
+    const busy = key && noteBusy.has(key);
+    const btnNote = el('button', {
+      class: 'srp-icon srp-note' + (done ? ' srp-active' : ''),
+      title: !canWrite ? 'Не знаю, к какому заказу CRM относится комментарий'
+        : done ? `Убрать комментарий из пометки заказа ${targetId} — вернуть, как было`
+        : `Вписать комментарий в пометку заказа ${targetId} и сохранить`,
+      onclick: () => (done ? undoNote : insertNote)(targetId, p.text, key),
+    }, busy ? '⏳' : done ? '↩️' : '📝');
+    if (!canWrite || busy) btnNote.disabled = true;
+
+    return el('tr', null,
+      el('td', warn ? { class: 'warn', title: warn } : null, numCell),
+      el('td', warn ? { class: 'warn', title: warn } : null, idCell),
+      el('td', { class: 'srp-cm-text srp-copy', title: 'Нажмите, чтобы скопировать', onclick: () => copyText(p.text) },
+        p.text || '—',
+        warn ? el('div', { class: 'srp-sub' }, '⚠ ' + warn) : null),
+      el('td', { class: 'srp-cm-btn' }, btnNote));
+  }
+
+  // ---- Комментарий → «Пометка к заказу» и обратно ----
+  // Что вписали, хранится в localStorage для этой ссылки отчёта: { before, after }
+  const noteKey = (id, text) => `${STORE_KEY}|note|${normId(id)}|${text}`;
+  const noteBusy = new Set();
+  const loadJson = k => { try { const s = localStorage.getItem(k); return s ? JSON.parse(s) : null; } catch (e) { return null; } };
+  const saveJson = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+  const dropJson = k => { try { localStorage.removeItem(k); } catch (e) {} };
+
+  async function runNoteOp(key, op) {
+    noteBusy.add(key); render();
+    try { await op(); }
+    catch (e) { alert(e.message); }
+    finally { noteBusy.delete(key); render(); }
+  }
+
+  function insertNote(id, text, key) {
+    return runNoteOp(key, async () => {
+      const r = await CRM.editOrderNote(id, cur =>
+        cur.includes(text) ? cur : cur.trim() ? cur.replace(/\s+$/, '') + '\n' + text : text);
+      if (!r.changed) return showToast('Этот текст уже есть в пометке');
+      saveJson(key, { before: r.before, after: r.after });
+      showToast(`Вписано в пометку ${id}`);
+    });
+  }
+
+  function undoNote(id, text, key) {
+    const rec = loadJson(key) || {};
+    return runNoteOp(key, async () => {
+      const r = await CRM.editOrderNote(id, cur => {
+        if (cur === rec.after) return rec.before;              // пометку не трогали — возвращаем как было
+        if (cur.includes('\n' + text)) return cur.replace('\n' + text, '');
+        if (cur.includes(text)) return cur.replace(text, '').trim();
+        return cur;                                             // нашего текста там уже нет
+      });
+      dropJson(key);
+      showToast(r.changed ? `Пометка ${id} возвращена` : 'В пометке этого текста уже нет');
+    });
+  }
+
+  /** Копирование в буфер с подсказкой «Скопировано» */
+  function copyText(text) {
+    if (!text) return;
+    const done = () => showToast('Скопировано');
+    const fallback = () => {
+      const t = el('textarea');
+      t.value = text;
+      t.style.cssText = 'position:fixed;left:-9999px;top:0';
+      document.body.append(t);
+      t.select();
+      try { document.execCommand('copy'); done(); } catch (e) { showToast('Не удалось скопировать'); }
+      t.remove();
+    };
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, fallback);
+    else fallback();
+  }
+
+  let toastTimer;
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('on'), 1500);
+  }
+
+  // =====================================================================
+  // 5. ОКНО
+  // =====================================================================
+  const css = `
+  #srp{position:fixed;top:70px;right:20px;width:520px;max-width:calc(100vw - 20px);z-index:2147483000;
+    background:#fff;color:#222;border:1px solid #cfd4da;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);
+    font:13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  #srp *{box-sizing:border-box}
+  #srp .srp-head{display:flex;align-items:center;gap:6px;padding:8px 10px;background:#f3f5f7;
+    border-bottom:1px solid #e1e4e8;border-radius:10px 10px 0 0;cursor:move;user-select:none}
+  #srp.srp-collapsed .srp-head{border-bottom:none;border-radius:10px}
+  #srp .srp-title{flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #srp button{font:inherit;border:1px solid #c5cbd2;background:#fff;border-radius:6px;padding:4px 10px;cursor:pointer}
+  #srp button:hover{background:#eef2f6}
+  #srp button.srp-icon{padding:4px 8px;min-width:30px}
+  #srp button.srp-active{background:#dbe9ff;border-color:#7aa7e8}
+  #srp .srp-body{padding:10px;max-height:70vh;overflow:auto}
+  #srp.srp-collapsed .srp-body{display:none}
+  #srp table{width:100%;border-collapse:collapse}
+  #srp th,#srp td{border:1px solid #e1e4e8;padding:5px 6px;vertical-align:top;text-align:left}
+  #srp th{background:#fafbfc;font-weight:600}
+  #srp td.srp-param{font-weight:600;white-space:nowrap}
+  #srp td.ok{background:#e7f6ea;color:#1d6b2f}
+  #srp td.warn{background:#fff6d6;color:#7a5a00}
+  #srp td.bad{background:#fde8e8;color:#9b1c1c}
+  #srp td.none{background:#f3f4f6;color:#6b7280}
+  #srp input,#srp textarea{width:100%;font:inherit;border:1px solid #9db8e0;border-radius:4px;padding:2px 4px}
+  #srp .srp-sub{color:#6b7280;font-size:12px}
+  #srp .srp-cm-label{margin:10px 0 4px;font-weight:600}
+  #srp .srp-cm{white-space:pre-wrap;background:#fafbfc;border:1px solid #e1e4e8;border-radius:6px;padding:6px 8px;min-height:32px}
+  #srp table.srp-cm-pts{margin-top:6px}
+  #srp table.srp-cm-pts td:not(.srp-cm-text){white-space:nowrap;width:1%}
+  #srp td.srp-cm-text{white-space:pre-wrap}
+  #srp .srp-copy{cursor:copy}
+  #srp .srp-copy:hover{background:#eef4ff}
+  #srp td.srp-cm-btn{padding:3px 4px;vertical-align:middle}
+  #srp button.srp-note{padding:2px 6px;min-width:0}
+  #srp button:disabled{opacity:.35;cursor:not-allowed;background:#fff}
+  #srp .srp-toast{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);background:#1f2937;color:#fff;
+    padding:4px 12px;border-radius:6px;font-size:12px;opacity:0;pointer-events:none;transition:opacity .2s}
+  #srp .srp-toast.on{opacity:.92}
+  #srp.srp-under-modal{visibility:hidden}
+  #srp td.srp-findable{cursor:pointer}
+  #srp td.srp-findable:hover{filter:brightness(.95)}
+  ::highlight(srp-find){background:#fde047;color:#111}
+  ::highlight(srp-find-cur){background:#f97316;color:#fff}
+  #srp .srp-reset{margin-top:8px}
+  `;
+
+  const ICON = { ok: '✔', warn: '⚠', bad: '✖', none: '…' };
+  let editing = false;
+  let collapsed = false;
+  try { collapsed = localStorage.getItem('strumReportCollapsed') === '1'; } catch (e) {}
+
+  function el(tag, attrs, ...children) {
+    const e = document.createElement(tag);
+    if (attrs) Object.entries(attrs).forEach(([k, v]) => {
+      if (k === 'class') e.className = v;
+      else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+      else e.setAttribute(k, v);
+    });
+    children.flat().forEach(c => { if (c !== null && c !== undefined) e.append(c instanceof Node ? c : String(c)); });
+    return e;
+  }
+
+  const style = el('style');
+  style.textContent = css;
+  document.head.append(style);
+
+  const btnStatus = el('button', { title: 'Проставить статусы точек по отчёту', onclick: () => CRM.applyStatuses(reportForApply()) }, 'Статус');
+  const btnKm = el('button', { title: 'Записать километраж из отчёта', onclick: () => CRM.applyKm(num(report.km)) }, 'КМ');
+  const btnEdit = el('button', { class: 'srp-icon', title: 'Редактировать значения отчёта', onclick: toggleEdit }, '✎');
+  const btnHide = el('button', { class: 'srp-icon', title: 'Скрыть / раскрыть', onclick: toggleCollapse }, '▾');
+  const title = el('div', { class: 'srp-title' }, `Отчёт · ${ROUTE_ID || '?'}`);
+  const head = el('div', { class: 'srp-head' }, title, btnStatus, btnKm, btnEdit, btnHide);
+  const body = el('div', { class: 'srp-body' });
+  const toast = el('div', { class: 'srp-toast' });
+  const panel = el('div', { id: 'srp' }, head, body, toast);
+  document.body.append(panel);
+
+  function reportForApply() {
+    return { total: num(report.pts) || 0, ns: nums(report.ns), nl: nums(report.nl) };
+  }
+
+  function toggleEdit() {
+    if (editing) {
+      body.querySelectorAll('[data-key]').forEach(inp => { report[inp.dataset.key] = inp.value.trim(); });
+      saveReport();
+    }
+    editing = !editing;
+    btnEdit.classList.toggle('srp-active', editing);
+    btnEdit.textContent = editing ? '💾' : '✎';
+    btnEdit.title = editing ? 'Сохранить правки' : 'Редактировать значения отчёта';
+    if (editing && collapsed) toggleCollapse();
+    render();
+  }
+
+  function toggleCollapse() {
+    collapsed = !collapsed;
+    panel.classList.toggle('srp-collapsed', collapsed);
+    btnHide.textContent = collapsed ? '▸' : '▾';
+    try { localStorage.setItem('strumReportCollapsed', collapsed ? '1' : '0'); } catch (e) {}
+  }
+  if (collapsed) { panel.classList.add('srp-collapsed'); btnHide.textContent = '▸'; }
+
+  // Ячейка значения отчёта: текст или поле ввода в режиме правки
+  const repCell = (key, display, hint) => editing
+    ? el('td', null, el('input', { 'data-key': key, value: report[key] || '', placeholder: hint || '' }))
+    : el('td', null, display === '' || display === null ? '—' : display);
+
+  const resCell = r => r.find === undefined
+    ? el('td', { class: r.level }, `${ICON[r.level]} ${r.text}`)
+    : el('td', {
+        class: r.level + ' srp-findable',
+        title: `Нажмите — найти ${r.find} на странице (ещё раз — следующее; Esc — снять подсветку)`,
+        onclick: () => findOnPage(r.find, String(r.find)),
+      }, `${ICON[r.level]} ${r.text} 🔍`);
+
+  function render() {
+    const crmName = safe(() => CRM.getDriverName());
+    const crmKm = safe(() => CRM.getKm());
+    const routeType = safe(() => CRM.getRouteType());
+    const crmPoints = safe(() => CRM.getPoints());
+    const crmMoney = safe(() => CRM.getMoney());
+    const show = v => (v === null || v === undefined || v === '') ? '—' : v;
+
+    const rows = [];
+
+    // ФИО
+    rows.push(el('tr', null,
+      el('td', { class: 'srp-param' }, 'ФИО'),
+      el('td', null, show(crmName)),
+      repCell('fio', report.fio),
+      resCell(compareName(crmName, report.fio))));
+
+    // Километраж
+    rows.push(el('tr', null,
+      el('td', { class: 'srp-param' }, 'Километраж'),
+      el('td', null, show(crmKm),
+        routeType && routeType.value ? [el('br'), el('span', { class: 'srp-sub' }, routeType.text)] : null),
+      repCell('km', report.km),
+      resCell(compareKm(crmKm, report.km, routeType))));
+
+    // Точки, не загруженные, не сданные — свои строки, общий результат (ячейка на все строки).
+    // Строки «Не загружены» / «Не сданы» скрыты, если их нет ни в CRM, ни в отчёте (кроме режима правки).
+    const crmByStatus = st => crmPoints ? crmPoints.filter(p => p.status === st).map(p => p.num).sort((a, b) => a - b) : [];
+    const ptRows = [
+      { name: 'Точки', crm: crmPoints ? `${crmPoints.length} шт.` : '—',
+        key: 'pts', rep: `${num(report.pts) || 0} шт.`, hint: 'всего', always: true },
+      { name: 'Не загружены', crm: crmPoints ? listT(crmByStatus('nl')) : '—',
+        key: 'nl', rep: listT(nums(report.nl)), hint: '5', has: crmByStatus('nl').length || nums(report.nl).length },
+      { name: 'Не сданы', crm: crmPoints ? listT(crmByStatus('ns')) : '—',
+        key: 'ns', rep: listT(nums(report.ns)), hint: '3,6', has: crmByStatus('ns').length || nums(report.ns).length },
+    ].filter(r => r.always || r.has || editing);
+    const ptResult = resCell(comparePoints(crmPoints, report));
+    ptResult.rowSpan = ptRows.length;
+    ptResult.style.verticalAlign = 'middle';
+    ptRows.forEach((r, i) => rows.push(el('tr', null,
+      el('td', { class: 'srp-param' }, r.name),
+      el('td', null, r.crm),
+      repCell(r.key, r.rep, r.hint),
+      i === 0 ? ptResult : null)));
+
+    // Валюты: каждая, что есть в отчёте или в CRM (в режиме правки — все)
+    CURRENCIES.forEach(cur => {
+      const inRep = num(report[cur]) !== null && num(report[cur]) !== 0;
+      const inCrm = crmMoney && num(crmMoney[cur]) !== null && num(crmMoney[cur]) !== 0;
+      if (!editing && !inRep && !inCrm) return;
+      rows.push(el('tr', null,
+        el('td', { class: 'srp-param' }, cur),
+        el('td', null, crmMoney ? show(crmMoney[cur]) : '—'),
+        repCell(cur, report[cur]),
+        resCell(compareMoney(cur, crmMoney, report[cur]))));
+    });
+
+    const table = el('table', null,
+      el('thead', null, el('tr', null, el('th', null, 'Параметр'), el('th', null, 'CRM'), el('th', null, 'Отчёт'), el('th', null, 'Результат'))),
+      el('tbody', null, rows));
+
+    // Комментарий: общий — текстовым блоком, по точкам — таблицей «Точка | ID | Комментарий»
+    const cmBlocks = [];
+    if (editing) {
+      cmBlocks.push(el('textarea', { 'data-key': 'cm', rows: '4' }, report.cm));
+    } else {
+      const cm = parseComment(report.cm);
+      if (cm.general || !cm.points.length) cmBlocks.push(cm.general
+        ? el('div', { class: 'srp-cm srp-copy', title: 'Нажмите, чтобы скопировать', onclick: () => copyText(cm.general) }, cm.general)
+        : el('div', { class: 'srp-cm' }, '—'));
+      const idMap = pointIdMap(crmPoints, report);
+      if (cm.points.length) cmBlocks.push(el('table', { class: 'srp-cm-pts' },
+        el('thead', null, el('tr', null, el('th', { title: 'Точка' }, 'Т.'), el('th', null, 'ID'), el('th', null, 'Комментарий'), el('th'))),
+        el('tbody', null, cm.points.map(p => commentPointRow(p, idMap)))));
+    }
+
+    const children = [table, el('div', { class: 'srp-cm-label' }, 'Комментарий водителя'), ...cmBlocks];
+    if (editing) children.push(el('button', { class: 'srp-reset', onclick: () => { resetReport(); render(); } }, '↺ Вернуть значения из отчёта'));
+
+    body.replaceChildren(...children);
+  }
+
+  function safe(fn) { try { const v = fn(); return v === undefined ? null : v; } catch (e) { console.warn('[Струм отчёт]', e); return null; } }
+
+  // Перетаскивание окна за заголовок
+  (function drag() {
+    let sx, sy, ox, oy, moving = false;
+    head.addEventListener('mousedown', e => {
+      if (e.target.closest('button')) return;
+      moving = true; sx = e.clientX; sy = e.clientY;
+      const r = panel.getBoundingClientRect(); ox = r.left; oy = r.top;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', e => {
+      if (!moving) return;
+      panel.style.left = Math.max(0, ox + e.clientX - sx) + 'px';
+      panel.style.top = Math.max(0, oy + e.clientY - sy) + 'px';
+      panel.style.right = 'auto';
+    });
+    document.addEventListener('mouseup', () => { moving = false; });
+  })();
+
+  // Окно видно только на странице того маршрута, к которому относится отчёт
+  function updateVisibility() {
+    panel.style.display = routeIdFromHash() === ROUTE_ID ? '' : 'none';
+  }
+  window.addEventListener('hashchange', updateVisibility);
+  updateVisibility();
+
+  render();
+  // CRM подгружает данные не сразу — периодически перечитываем (кроме режима правки)
+  setInterval(() => { if (!editing && panel.style.display !== 'none') render(); }, REFRESH_MS);
+  // Пока открыто окно CRM (например, «Пометка к заказу») — прячем окно сверки, чтобы не закрывало его
+  setInterval(() => panel.classList.toggle('srp-under-modal', !!document.querySelector('#modal.on')), 200);
+})();
