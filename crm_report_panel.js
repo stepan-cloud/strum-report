@@ -103,15 +103,23 @@
       return rows.length ? rows.map(r => ({ num: r.num, id: r.id, status: r.status })) : null;
     },
 
-    /** Суммы из блока «Принято»: «Наличные: BYN 10 257» */
+    /*
+     * Наличные из блока «Принято» → { BYN: 10490, USD: 50 }.
+     * Блок — div.rt-cifry-prin, по строке на способ оплаты: «Наличные: <b>BYN 10 490</b>», «ЕРИП: <b>BYN 819</b>»…
+     * Водитель сдаёт только наличные, поэтому берём только строки «Наличные» (ЕРИП и прочее — не касса водителя).
+     * Раньше читался весь блок, и строка «ЕРИП» затирала наличные.
+     * Пока ничего не сдано — в блоке «пока ничего не сдано», вернётся {}.
+     */
     getMoney() {
-      const el = [...document.querySelectorAll('main div, main span')]
-        .find(e => e.children.length <= 3 && /^\s*Наличные:/.test(e.textContent) && e.textContent.length < 200);
-      if (!el) return null;
+      const box = document.querySelector('.rt-cifry-prin');
+      if (!box) return null;
       const money = {};
-      const re = /(BYN|USD|EUR|RUB)\s*([\d\s .,]+)/g;
-      let m;
-      while ((m = re.exec(el.textContent))) money[m[1]] = num(m[2]);
+      [...box.children].forEach(line => {
+        const m = line.textContent.replace(/\s+/g, ' ').match(/^\s*([^:]+):\s*(BYN|USD|EUR|RUB)\s*([\d .,]+)/i);
+        if (!m || !/^наличн/i.test(m[1].trim())) return;
+        const cur = m[2].toUpperCase();
+        money[cur] = round((money[cur] || 0) + num(m[3]));
+      });
       return money;
     },
 
