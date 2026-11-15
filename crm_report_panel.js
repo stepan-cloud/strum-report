@@ -90,6 +90,15 @@
       return i && i.value.trim() ? i.value.trim() : null;
     },
 
+    /** Заказы, в товарах которых есть «@табл опт» (ячейка td.goods: текст и подсказка) */
+    getOptRows() {
+      const re = /@\s*табл\.?\s*опт/i;
+      return crmRows().filter(r => {
+        const g = r.tr && r.tr.querySelector('td.goods');
+        return g && (re.test(g.textContent) || re.test(g.getAttribute('title') || ''));
+      });
+    },
+
     /** Тип рейса: select#rt_rtype → { value: 'minsk' | 'intercity' | ... | '', text: 'Минск' } */
     getRouteType() {
       const s = document.getElementById('rt_rtype');
@@ -751,6 +760,7 @@
   #srp button.srp-ok:hover{background:#bbf7d0}
   #srp button.srp-bad{background:#fde8e8;border-color:#f5a3a3;color:#9b1c1c}
   #srp button.srp-bad:hover{background:#fbd0d0}
+  #srp button.srp-opt{font-weight:700;letter-spacing:.5px}
   #srp .srp-body{padding:10px;max-height:70vh;overflow:auto}
   #srp.srp-collapsed .srp-body{display:none}
   #srp table{width:100%;border-collapse:collapse}
@@ -809,7 +819,20 @@
   const btnEdit = el('button', { class: 'srp-icon', title: 'Редактировать значения отчёта', onclick: toggleEdit }, '✎');
   const btnHide = el('button', { class: 'srp-icon', title: 'Скрыть / раскрыть', onclick: toggleCollapse }, '▾');
   const title = el('div', { class: 'srp-title' }, `Отчёт · ${ROUTE_ID || '?'}`);
-  const head = el('div', { class: 'srp-head' }, title, btnStatus, btnKm, btnEdit, btnHide);
+  // «ОПТ» — красная плашка, если в товарах рейса есть «@табл опт»; клик — к следующей такой строке
+  let optIdx = -1;
+  const optBadge = el('button', { class: 'srp-bad srp-opt', onclick: () => {
+    const rows = safe(() => CRM.getOptRows()) || [];
+    if (!rows.length) return;
+    optIdx = (optIdx + 1) % rows.length;
+    const tr = rows[optIdx].tr;
+    tr.scrollIntoView({ block: 'center' });
+    tr.style.outline = '3px solid #dc2626';
+    setTimeout(() => { tr.style.outline = ''; }, 2500);
+    showToast(`Опт: ${rows[optIdx].num}т (${optIdx + 1} из ${rows.length})`);
+  } }, 'ОПТ');
+  optBadge.style.display = 'none';
+  const head = el('div', { class: 'srp-head' }, title, optBadge, btnStatus, btnKm, btnEdit, btnHide);
   const body = el('div', { class: 'srp-body' });
   const toast = el('div', { class: 'srp-toast' });
   const panel = el('div', { id: 'srp' }, head, body, toast);
@@ -865,6 +888,11 @@
     const crmKm = safe(() => CRM.getKm());
     const routeType = safe(() => CRM.getRouteType());
     const crmPoints = safe(() => CRM.getPoints());
+
+    // «ОПТ» — видна, только если в товарах есть «@табл опт»
+    const optRows = safe(() => CRM.getOptRows()) || [];
+    optBadge.style.display = optRows.length ? '' : 'none';
+    optBadge.title = `В товарах есть «@табл опт»: ${optRows.map(r => r.num + 'т').join(', ')}. Нажмите — показать`;
 
     // Цвет кнопок: зелёная — в CRM уже как в отчёте, красная — отличается
     const repKm = num(report.km);
