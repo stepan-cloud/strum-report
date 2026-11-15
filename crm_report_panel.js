@@ -158,19 +158,18 @@
 
     /** Проставить статусы точек по отчёту (с подтверждением) */
     applyStatuses(rep) {
+      // Без подтверждения (так попросил пользователь). CRM сохраняет статус сразу при смене
+      // (rtSetOrdStatus → запрос на сервер → перерисовка страницы).
       const plan = CRM.planStatuses(rep);
-      if (plan.error) return alert(plan.error);
+      if (plan.error) return showToast(plan.error);
       const changes = plan.changes;
-      if (!changes.length) return alert('Все статусы уже совпадают с отчётом.');
-
-      const list = changes.map(p =>
-        `Точка ${p.row.num} (отчёт ${p.repNum}т): ${p.row.statusText || '—'} → ${CRM_TEXT[p.status]}`).join('\n');
-      if (!confirm(`Проставить статусы?\n\n${list}`)) return;
+      if (!changes.length) return showToast('Статусы уже как в отчёте');
 
       changes.forEach(p => {
         const opt = [...p.row.select.options].find(o => o.text.trim() === CRM_TEXT[p.status]);
         if (opt) setFieldValue(p.row.select, opt.value);
       });
+      showToast('Статусы: ' + changes.map(p => `${p.row.num} → ${CRM_TEXT[p.status]}`).join(', '));
     },
 
     /**
@@ -221,10 +220,11 @@
     /** Вписать километраж из отчёта (с подтверждением) */
     applyKm(km) {
       const i = kmInput();
-      if (!i) return alert('Не нашёл поле «Длина маршрута».');
-      if (km === null) return alert('В отчёте нет километража.');
-      if (num(i.value) === km) return alert('Километраж уже совпадает.');
-      if (!confirm(`Длина маршрута: ${i.value || '—'} → ${km}?`)) return;
+      // Без подтверждения. CRM сохраняет км сразу при изменении поля (rtNavKm → запрос на сервер).
+      if (!i) return showToast('Не нашёл поле «Длина маршрута»');
+      if (km === null) return showToast('В отчёте нет километража');
+      if (num(i.value) === km) return showToast('Километраж уже как в отчёте');
+      showToast(`Длина маршрута: ${i.value || '—'} → ${km}`);
       i.focus();
       setFieldValue(i, String(km));
       i.blur();
