@@ -130,12 +130,19 @@
       const box = document.querySelector('.rt-cifry-prin');
       if (!box) return null;
       const money = {};
+      let anyLine = false, cashLine = false;
       [...box.children].forEach(line => {
         const m = line.textContent.replace(/\s+/g, ' ').match(/^\s*([^:]+):\s*(BYN|USD|EUR|RUB)\s*([\d .,]+)/i);
-        if (!m || !/^наличн/i.test(m[1].trim())) return;
+        if (!m) return;
+        anyLine = true;
+        if (!/^наличн/i.test(m[1].trim())) return;
+        cashLine = true;
         const cur = m[2].toUpperCase();
         money[cur] = round((money[cur] || 0) + num(m[3]));
       });
+      // Почему валюты может не быть: 'empty' — в «Принято» ничего не сдано,
+      // 'nocash' — есть только безнал (ЕРИП и т. п.), 'ok' — наличные есть, но не в этой валюте
+      money._status = !anyLine ? 'empty' : !cashLine ? 'nocash' : 'ok';
       return money;
     },
 
@@ -395,8 +402,11 @@
   function compareMoney(cur, crmMoney, rep) {
     const c = crmMoney ? num(crmMoney[cur]) : null;
     const r = num(rep);
-    if (crmMoney === null) return NONE('Нет сумм в CRM');
-    if (c === null) return WARN('В CRM нет этой валюты');
+    if (crmMoney === null) return NONE('Не нашёл блок «Принято» в CRM');
+    if (c === null) return WARN(
+      crmMoney._status === 'empty' ? 'В «Принято» пока ничего не сдано'
+      : crmMoney._status === 'nocash' ? 'В «Принято» нет наличных — только безнал'
+      : `В «Принято» нет наличных ${cur}`);
     if (r === null) return WARN('В отчёте не указано');
     if (Math.abs(c - r) < 0.005) return OK('Совпадает');
     const diff = r - c;
