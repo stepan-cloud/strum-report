@@ -42,6 +42,13 @@
     return id ? id.padStart(6, '0') : null;
   }
 
+  /** Текст «Пометки к заказу» в строке: div рядом с кнопкой ✏️; null — если ячейку не нашли */
+  function rowNote(tr) {
+    const pencil = tr && tr.querySelector('button[title="Поправить пометку к заказу"]');
+    const div = pencil && pencil.parentElement && [...pencil.parentElement.children].find(e => e.tagName === 'DIV');
+    return div ? div.textContent : null;
+  }
+
   /** Строки таблицы «Заказы в рейсе», по порядку объезда */
   function crmRows() {
     const rows = [...document.querySelectorAll(STATUS_SELECT)].map((sel, i) => {
@@ -49,7 +56,7 @@
       const ord = tr && tr.querySelector(ORDER_INPUT);
       const n = ord ? parseInt(ord.value, 10) : NaN;
       const text = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text.trim() : '';
-      return { num: isNaN(n) ? i + 1 : n, id: orderId(tr), tr, select: sel, statusText: text, status: CRM_STATUS[text] || '' };
+      return { num: isNaN(n) ? i + 1 : n, id: orderId(tr), tr, note: rowNote(tr), select: sel, statusText: text, status: CRM_STATUS[text] || '' };
     });
     return rows.sort((a, b) => a.num - b.num);
   }
@@ -100,7 +107,7 @@
     /** Точки: [{ num, id: '003149', status: 'ok' | 'ns' | 'nl' | '' }] */
     getPoints() {
       const rows = crmRows();
-      return rows.length ? rows.map(r => ({ num: r.num, id: r.id, status: r.status })) : null;
+      return rows.length ? rows.map(r => ({ num: r.num, id: r.id, note: r.note, status: r.status })) : null;
     },
 
     /*
@@ -178,8 +185,7 @@
       if (!row) throw new Error(`Не нашёл заказ ${id} в рейсе.`);
       const pencil = row.tr.querySelector('button[title="Поправить пометку к заказу"]');
       if (!pencil) throw new Error(`Не нашёл кнопку «Поправить пометку к заказу» у заказа ${id}.`);
-      const noteDiv = pencil.parentElement && [...pencil.parentElement.children].find(e => e.tagName === 'DIV');
-      const rowHasNote = !!(noteDiv && noteDiv.textContent.trim());
+      const rowHasNote = !!(rowNote(row.tr) || '').trim();
 
       pencil.click();
       const idRe = new RegExp(`(^|\\D)0*${normId(id)}(\\D|$)`);
@@ -593,8 +599,8 @@
    * ровно на незагруженные — оставшиеся точки отчёта по порядку; иначе — по «Порядку объезда».
    */
   function pointIdMap(crmPoints, rep) {
-    const idByNum = new Map(), numById = new Map();
-    if (!crmPoints) return { idByNum, numById };
+    const idByNum = new Map(), numById = new Map(), noteById = new Map();
+    if (!crmPoints) return { idByNum, numById, noteById };
     const total = num(rep.pts) || 0, nl = nums(rep.nl);
     let repNums;
     if (crmPoints.length === total) repNums = crmPoints.map((_, i) => i + 1);
@@ -605,8 +611,9 @@
       if (!p.id) return;
       idByNum.set(repNums[i], p.id);
       numById.set(normId(p.id), repNums[i]);
+      noteById.set(normId(p.id), p.note);
     });
-    return { idByNum, numById };
+    return { idByNum, numById, noteById };
   }
 
   /**
@@ -628,12 +635,16 @@
     const targetId = p.id !== null ? p.id : crmId || null;
     const canWrite = !!(targetId && p.text && map.numById.has(normId(targetId)));
     const key = canWrite ? noteKey(targetId, p.text) : null;
-    const done = key && loadJson(key);   // уже вписан → кнопка «вернуть как было»
+    // Комментарий уже в пометке → кнопка «убрать». Смотрим на саму пометку в CRM
+    // (её мог вписать и человек вручную); если пометку прочитать не удалось — на свою запись.
+    const crmNote = canWrite ? map.noteById.get(normId(targetId)) : null;
+    const done = !canWrite ? false
+      : typeof crmNote === 'string' ? noteHas(crmNote, p.text) : !!loadJson(key);
     const busy = key && noteBusy.has(key);
     const btnNote = el('button', {
       class: 'srp-icon srp-note' + (done ? ' srp-active' : ''),
       title: !canWrite ? 'Не знаю, к какому заказу CRM относится комментарий'
-        : done ? `Убрать комментарий из пометки заказа ${targetId} — вернуть, как было`
+        : done ? `Комментарий есть в пометке заказа ${targetId} — убрать его и сохранить`
         : `Вписать комментарий в пометку заказа ${targetId} и сохранить`,
       onclick: () => (done ? undoNote : insertNote)(targetId, p.text, key),
     }, busy ? '⏳' : done ? '↩️' : '📝');
@@ -663,10 +674,19 @@
     finally { noteBusy.delete(key); render(); }
   }
 
+  // Сравниваем без учёта лишних пробелов и переносов строк
+  const squash = s => String(s || '').replace(/\s+/g, ' ').trim();
+  const noteHas = (note, text) => !!squash(text) && squash(note).includes(squash(text));
+  /** Вырезать text из пометки (пробелы/переносы внутри текста — любые) */
+  function cutText(note, text) {
+    const esc = squash(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+');
+    return note.replace(new RegExp('\\n?[ \\t]*' + esc), '').replace(/^\s+|\s+$/g, '');
+  }
+
   function insertNote(id, text, key) {
     return runNoteOp(key, async () => {
       const r = await CRM.editOrderNote(id, cur =>
-        cur.includes(text) ? cur : cur.trim() ? cur.replace(/\s+$/, '') + '\n' + text : text);
+        noteHas(cur, text) ? cur : cur.trim() ? cur.replace(/\s+$/, '') + '\n' + text : text);
       if (!r.changed) return showToast('Этот текст уже есть в пометке');
       saveJson(key, { before: r.before, after: r.after });
       showToast(`Вписано в пометку ${id}`);
@@ -677,10 +697,9 @@
     const rec = loadJson(key) || {};
     return runNoteOp(key, async () => {
       const r = await CRM.editOrderNote(id, cur => {
-        if (cur === rec.after) return rec.before;              // пометку не трогали — возвращаем как было
-        if (cur.includes('\n' + text)) return cur.replace('\n' + text, '');
-        if (cur.includes(text)) return cur.replace(text, '').trim();
-        return cur;                                             // нашего текста там уже нет
+        if (rec.after !== undefined && cur === rec.after) return rec.before; // вписывали мы и пометку не трогали
+        if (noteHas(cur, text)) return cutText(cur, text);                   // вырезаем только этот комментарий
+        return cur;                                                          // его там уже нет
       });
       dropJson(key);
       showToast(r.changed ? `Пометка ${id} возвращена` : 'В пометке этого текста уже нет');
