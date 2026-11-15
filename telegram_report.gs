@@ -202,10 +202,18 @@ function buildCrmLink_(routeId, data) {
   return base + (query ? '?' + query : '') + '#' + hash + encodeURIComponent(routeId);
 }
 
-/** "(12345) 13.11.2026" → "12345". Если скобок нет — берём весь текст. */
+/**
+ * ID маршрута в CRM — целое число (ссылка #route/186). Как его пишут:
+ *   "(12345) 13.11.2026" → "12345"  — ID в скобках, как в списке формы;
+ *   "186.13"             → "186"    — ID и через точку число месяца;
+ *   "186 13.11", "№186"  → "186".
+ * Берём первое число (внутри скобок, если они есть); если цифр нет — текст как есть.
+ */
 function extractRouteId_(raw) {
   const m = raw.match(/\(([^)]+)\)/);
-  return (m ? m[1] : raw).trim();
+  const s = (m ? m[1] : raw).trim();
+  const n = s.match(/\d+/);
+  return n ? n[0] : s;
 }
 
 /** Экранирование для HTML-режима Telegram. */
