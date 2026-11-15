@@ -123,10 +123,13 @@
       return money;
     },
 
-    /** Проставить статусы точек по отчёту (с подтверждением) */
-    applyStatuses(rep) {
+    /**
+     * Какие статусы в CRM надо поменять, чтобы совпало с отчётом.
+     * → { changes: [{ repNum, status, row }] } или { error: 'текст' }
+     */
+    planStatuses(rep) {
       const rows = crmRows();
-      if (!rows.length) return alert('Не нашёл точки на странице.');
+      if (!rows.length) return { error: 'Не нашёл точки на странице.' };
 
       // Какой статус должен быть у каждой точки отчёта
       const want = [];
@@ -141,10 +144,16 @@
         const left = want.filter(w => w.status !== 'nl');
         pairs = left.map((w, i) => ({ ...w, row: rows[i] }));
       } else {
-        return alert(`Количество точек не сходится (CRM ${rows.length}, отчёт ${rep.total}) — статусы не проставляю.`);
+        return { error: `Количество точек не сходится (CRM ${rows.length}, отчёт ${rep.total}) — статусы не проставляю.` };
       }
+      return { changes: pairs.filter(p => p.row.status !== p.status) };
+    },
 
-      const changes = pairs.filter(p => p.row.status !== p.status);
+    /** Проставить статусы точек по отчёту (с подтверждением) */
+    applyStatuses(rep) {
+      const plan = CRM.planStatuses(rep);
+      if (plan.error) return alert(plan.error);
+      const changes = plan.changes;
       if (!changes.length) return alert('Все статусы уже совпадают с отчётом.');
 
       const list = changes.map(p =>
@@ -494,19 +503,36 @@
   //   «1 точка (004376)». Номер точки — от 1 до 30.
   //   «1т, 3т - закрыто» — один комментарий на обе точки.
   // =====================================================================
-  const N = String.raw`(?<!\d)([1-9]|[12]\d|30)(?!\d)`;
+  //   Слово «точка» узнаём и с опечатками: «точяка», «тчка», «точька», «тчк» (см. isPointWord).
+  //   «ID» — и как «I'd», «Id:», «айди».
+  const N = String.raw`(?<!\d)(?<n>[1-9]|[12]\d|30)(?!\d)`;
   const COMMENT_MARKERS = [
-    // «1т», «1 т.», «1 точка», «1-я точка», «на 1 точке», «1я точка маршрута»
-    { re: String.raw`(?:(?<!\p{L})(?:на|в)\s+)?${N}\s*(?:-?\s*(?:я|ая|ой|й)\s*)?(?:точк\p{L}*|т\.?)(?!\p{L})(?:\s+маршрута)?`, num: 1 },
-    // «Точка 1», «Адрес № 7», «т.1», «№7»
-    { re: String.raw`(?:(?<!\p{L})(?:точк\p{L}*|адрес\p{L}*|т\.)\s*(?:№\s*)?|№\s*)${N}`, num: 1 },
+    // «1т», «1 т.», «1 точка», «1-я точка», «на 1 точке», «1я точка маршрута», «3 точяка»
+    { re: String.raw`(?:(?<!\p{L})(?:на|в)\s+)?${N}\s*(?:-?\s*(?:я|ая|ой|й)\s*)?(?:(?<w>\p{L}{3,9})|т\.?)(?!\p{L})(?:\s+маршрута)?`,
+      ok: g => !g.w || isPointWord(g.w) },
+    // «Точка 1», «Адрес № 7», «т.1», «№7», «Тчк 2»
+    { re: String.raw`(?:(?<!\p{L})(?:(?<w>\p{L}{3,9})|т\.)\s*(?:№\s*)?|№\s*)${N}`,
+      ok: g => !g.w || isPointWord(g.w) || /^адрес/i.test(g.w) },
     // «1я», «1-я», «2-ой»
-    { re: String.raw`${N}-?(?:я|ая|ой)(?!\p{L})`, num: 1 },
+    { re: String.raw`${N}-?(?:я|ая|ой)(?!\p{L})` },
     // в начале строки или после конца предложения: «1.», «1)», «1 -», «1:»
-    { re: String.raw`(?<=(?:^|[\n.;!?])\s*)${N}(?:\s*[.)](?!\d)|\s*[-–—:])`, num: 1 },
-    // «ID 004376», «004376»
-    { re: String.raw`(?:(?<!\p{L})(?:id|ид)\s*[:№]?\s*)?(?<!\d)(\d{6})(?!\d)`, id: 1 },
+    { re: String.raw`(?<=(?:^|[\n.;!?])\s*)${N}(?:\s*[.)](?!\d)|\s*[-–—:])` },
+    // «ID 004376», «I'd 004376», «004376»
+    { re: String.raw`(?:(?<!\p{L})(?:i['’\x60]?d|ид|айди)\s*[:№]?\s*)?(?<!\d)(?<id>\d{6})(?!\d)` },
   ].map(m => ({ ...m, re: new RegExp(m.re, 'giu') }));
+
+  // Слова, похожие на «точка», но ей не являющиеся
+  const NOT_POINT = new Set(['точно', 'точнее', 'тоже', 'только', 'тогда', 'тонна', 'тонны', 'тонн', 'того', 'тому',
+    'тот', 'тут', 'там', 'так', 'тем', 'тех', 'тачка', 'тачки', 'течка', 'тучка', 'точёк']);
+  const POINT_FORMS = ['точка', 'точке', 'точки', 'точку', 'точкой', 'точек'];
+  /** «точка» в любой форме и с опечаткой (1 ошибка, для слов от 6 букв — 2) */
+  function isPointWord(w) {
+    w = w.toLowerCase().replace(/ё/g, 'е');
+    if (w === 'тчк' || /^точк/.test(w)) return true;
+    if (w[0] !== 'т' || NOT_POINT.has(w)) return false;
+    const allowed = w.length >= 6 ? 2 : 1;
+    return POINT_FORMS.some(f => levenshtein(w, f) <= allowed);
+  }
 
   const SEP_ONLY = /^[\s\-–—:.,;()]*$/;
 
@@ -519,10 +545,12 @@
       m.re.lastIndex = 0;
       let x;
       while ((x = m.re.exec(text))) {
+        const g = x.groups || {};
+        if (m.ok && !m.ok(g)) { m.re.lastIndex = x.index + 1; continue; } // похоже, но не «точка»
         found.push({
           start: x.index, end: x.index + x[0].length,
-          num: m.num ? parseInt(x[m.num], 10) : null,
-          id: m.id ? x[m.id] : null,
+          num: g.n ? parseInt(g.n, 10) : null,
+          id: g.id || null,
         });
       }
     });
@@ -700,6 +728,10 @@
   #srp button:hover{background:#eef2f6}
   #srp button.srp-icon{padding:4px 8px;min-width:30px}
   #srp button.srp-active{background:#dbe9ff;border-color:#7aa7e8}
+  #srp button.srp-ok{background:#dcfce7;border-color:#86efac;color:#166534}
+  #srp button.srp-ok:hover{background:#bbf7d0}
+  #srp button.srp-bad{background:#fde8e8;border-color:#f5a3a3;color:#9b1c1c}
+  #srp button.srp-bad:hover{background:#fbd0d0}
   #srp .srp-body{padding:10px;max-height:70vh;overflow:auto}
   #srp.srp-collapsed .srp-body{display:none}
   #srp table{width:100%;border-collapse:collapse}
@@ -764,6 +796,13 @@
   const panel = el('div', { id: 'srp' }, head, body, toast);
   document.body.append(panel);
 
+  /** Кнопка меню: state 'ok' — зелёная, 'bad' — красная, '' — обычная */
+  function paintBtn(btn, state, title) {
+    btn.classList.toggle('srp-ok', state === 'ok');
+    btn.classList.toggle('srp-bad', state === 'bad');
+    btn.title = title;
+  }
+
   function reportForApply() {
     return { total: num(report.pts) || 0, ns: nums(report.ns), nl: nums(report.nl) };
   }
@@ -807,6 +846,18 @@
     const crmKm = safe(() => CRM.getKm());
     const routeType = safe(() => CRM.getRouteType());
     const crmPoints = safe(() => CRM.getPoints());
+
+    // Цвет кнопок: зелёная — в CRM уже как в отчёте, красная — отличается
+    const repKm = num(report.km);
+    if (crmKm === null || repKm === null) paintBtn(btnKm, '', 'Записать километраж из отчёта');
+    else if (crmKm === repKm) paintBtn(btnKm, 'ok', 'Километраж в CRM уже как в отчёте');
+    else paintBtn(btnKm, 'bad', `Записать километраж из отчёта: ${crmKm} → ${repKm}`);
+    const plan = crmPoints ? safe(() => CRM.planStatuses(reportForApply())) : null;
+    if (!plan) paintBtn(btnStatus, '', 'Проставить статусы точек по отчёту');
+    else if (plan.error) paintBtn(btnStatus, 'bad', plan.error);
+    else if (plan.changes.length) paintBtn(btnStatus, 'bad',
+      `Статусы отличаются от отчёта у ${plan.changes.length} т. — нажмите, чтобы проставить`);
+    else paintBtn(btnStatus, 'ok', 'Статусы в CRM уже как в отчёте');
     const crmMoney = safe(() => CRM.getMoney());
     const show = v => (v === null || v === undefined || v === '') ? '—' : v;
 
