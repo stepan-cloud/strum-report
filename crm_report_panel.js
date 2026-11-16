@@ -1043,16 +1043,19 @@
       cmBlocks.push(el('textarea', { 'data-key': 'cm', rows: '4' }, report.cm));
     } else {
       const cm = parseComment(report.cm);
-      if (cm.general || !cm.points.length) cmBlocks.push(cm.general
-        ? el('div', { class: 'srp-cm srp-copy', title: 'Нажмите, чтобы скопировать', onclick: () => copyText(cm.general) }, cm.general)
-        : el('div', { class: 'srp-cm' }, '—'));
+      // Общий комментарий показываем только если он есть; пустое поле с прочерком не выводим
+      if (cm.general) cmBlocks.push(
+        el('div', { class: 'srp-cm srp-copy', title: 'Нажмите, чтобы скопировать', onclick: () => copyText(cm.general) }, cm.general));
       const idMap = pointIdMap(crmPoints, report);
       if (cm.points.length) cmBlocks.push(el('table', { class: 'srp-cm-pts' },
         el('thead', null, el('tr', null, el('th', { title: 'Точка' }, 'Т.'), el('th', null, 'ID'), el('th', null, 'Комментарий'), el('th'))),
         el('tbody', null, cm.points.map(p => commentPointRow(p, idMap)))));
     }
 
-    const children = [table, el('div', { class: 'srp-cm-label' }, 'Комментарий водителя'), ...cmBlocks];
+    const children = [table];
+    // Заголовок «Комментарий водителя» нужен только когда под ним что-то есть
+    if (cmBlocks.length) children.push(el('div', { class: 'srp-cm-label' }, 'Комментарий водителя'));
+    children.push(...cmBlocks);
     if (editing) children.push(el('button', { class: 'srp-reset', onclick: () => { resetReport(); render(); } }, '↺ Вернуть значения из отчёта'));
 
     body.replaceChildren(...children);
