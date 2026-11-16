@@ -696,13 +696,47 @@
     }, busy ? '⏳' : done ? '↩️' : '📝');
     if (!canWrite || busy) btnNote.disabled = true;
 
+    // Клик по номеру / ID — прокрутка к строке заказа в CRM с подсветкой.
+    // Номер → заказ CRM под этим номером (или ID водителя, если номера нет); ID → этот заказ.
+    const numTarget = p.num !== null ? crmId || p.id : p.id;
+    const idTarget = p.id !== null ? p.id : crmId || null;
+    const gotoCell = (content, id, label) => el('td', {
+      class: (warn ? 'warn ' : '') + (id ? 'srp-goto' : ''),
+      title: (warn ? warn + '\n' : '') + (id ? `Показать ${label} в списке заказов` : 'Не знаю, какой это заказ в CRM'),
+      onclick: () => gotoOrder(id),
+    }, content);
+
     return el('tr', null,
-      el('td', warn ? { class: 'warn', title: warn } : null, numCell),
-      el('td', warn ? { class: 'warn', title: warn } : null, idCell),
+      gotoCell(numCell, numTarget, numTarget ? `заказ ${numTarget}` : ''),
+      gotoCell(idCell, idTarget, idTarget ? `заказ ${idTarget}` : ''),
       el('td', { class: 'srp-cm-text srp-copy', title: 'Нажмите, чтобы скопировать', onclick: () => copyText(p.text) },
         p.text || '—',
         warn ? el('div', { class: 'srp-sub' }, '⚠ ' + warn) : null),
       el('td', { class: 'srp-cm-btn' }, btnNote));
+  }
+
+  /** Прокрутить к строке заказа в CRM и подсветить её на несколько секунд */
+  function flashRow(tr, color) {
+    tr.scrollIntoView({ block: 'center' });
+    clearTimeout(tr._srpFlash);
+    if (!tr._srpFlash) tr._srpWas = { o: tr.style.outline, b: tr.style.backgroundColor };
+    tr.style.outline = `3px solid ${color.line}`;
+    tr.style.backgroundColor = color.bg;
+    tr._srpFlash = setTimeout(() => {
+      tr.style.outline = tr._srpWas.o;
+      tr.style.backgroundColor = tr._srpWas.b;
+      tr._srpFlash = null;
+    }, 2500);
+  }
+  const FLASH_POINT = { line: '#2563eb', bg: '#dbeafe' };
+  const FLASH_OPT = { line: '#dc2626', bg: '' };
+
+  function gotoOrder(id) {
+    if (!id) return showToast('Не знаю, какой это заказ в CRM');
+    const row = (safe(() => crmRows()) || []).find(r => r.id && normId(r.id) === normId(id));
+    if (!row) return showToast(`Заказа ${id} нет в списке рейса`);
+    flashRow(row.tr, FLASH_POINT);
+    showToast(`${row.num}т · заказ ${row.id}`);
   }
 
   // ---- Комментарий → «Пометка к заказу» и обратно ----
@@ -821,6 +855,9 @@
   #srp td.srp-cm-text{white-space:pre-wrap}
   #srp .srp-copy{cursor:copy}
   #srp .srp-copy:hover{background:#eef4ff}
+  #srp td.srp-goto{cursor:pointer;color:#1d4ed8;text-decoration:underline dotted}
+  #srp td.srp-goto:hover{background:#eef4ff}
+  #srp td.srp-goto.warn{color:#7a5a00}
   #srp td.srp-cm-btn{padding:3px 4px;vertical-align:middle}
   #srp button.srp-note{padding:2px 6px;min-width:0}
   #srp button:disabled{opacity:.35;cursor:not-allowed;background:#fff}
@@ -866,10 +903,7 @@
     const rows = safe(() => CRM.getOptRows()) || [];
     if (!rows.length) return;
     optIdx = (optIdx + 1) % rows.length;
-    const tr = rows[optIdx].tr;
-    tr.scrollIntoView({ block: 'center' });
-    tr.style.outline = '3px solid #dc2626';
-    setTimeout(() => { tr.style.outline = ''; }, 2500);
+    flashRow(rows[optIdx].tr, FLASH_OPT);
     showToast(`Опт: ${rows[optIdx].num}т (${optIdx + 1} из ${rows.length})`);
   } }, 'ОПТ');
   optBadge.style.display = 'none';
