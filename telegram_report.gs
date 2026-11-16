@@ -4,10 +4,11 @@
  */
 
 // ===== НАСТРОЙКИ =====
-// Токен бота и чат хранятся не в коде (код лежит в публичном репозитории на GitHub),
-// а в свойствах скрипта: Редактор скриптов → Настройки проекта ⚙ → Свойства скрипта:
-//   TELEGRAM_TOKEN — токен бота от @BotFather
-//   CHAT_ID        — куда слать сообщения
+// Токен бота и чат НЕ в этом файле (он лежит в публичном репозитории на GitHub).
+// Создайте в этом же проекте Apps Script второй файл (например «Настройки.gs») и впишите туда:
+//   const TELEGRAM_TOKEN = '...';   // токен бота от @BotFather
+//   const CHAT_ID = '...';          // куда слать сообщения
+// Можно вместо файла — в Настройки проекта ⚙ → Свойства скрипта (см. secret_).
 const CRM_ROUTE_URL = 'https://strum-crm.onrender.com/#route/';
 const TIMEZONE = 'Europe/Minsk';
 const SEPARATOR = '--------------------';
@@ -225,12 +226,27 @@ function esc_(s) {
     .replace(/"/g, '&quot;');
 }
 
-/** Значение из свойств скрипта (Настройки проекта ⚙ → Свойства скрипта). */
+/**
+ * Токен и чат. Откуда берутся (по порядку):
+ *   1) из другого файла этого же проекта Apps Script, например «Настройки.gs»:
+ *        const TELEGRAM_TOKEN = '123:ABC...';
+ *        const CHAT_ID = '123456789';
+ *      (можно и без const). Этот файл есть только в Apps Script — в репозиторий его не класть;
+ *   2) иначе — из свойств скрипта (Настройки проекта ⚙ → Свойства скрипта).
+ */
 function secret_(name) {
-  const v = PropertiesService.getScriptProperties().getProperty(name);
-  if (!v) throw new Error('Не задано свойство скрипта ' + name +
-    ': Редактор скриптов → Настройки проекта ⚙ → Свойства скрипта → Добавить свойство.');
-  return v.trim();
+  const fromFile = {
+    TELEGRAM_TOKEN: typeof TELEGRAM_TOKEN !== 'undefined' ? TELEGRAM_TOKEN : null,
+    CHAT_ID: typeof CHAT_ID !== 'undefined' ? CHAT_ID : null,
+  }[name];
+  const v = fromFile !== null && fromFile !== undefined && String(fromFile).trim() !== ''
+    ? fromFile
+    : PropertiesService.getScriptProperties().getProperty(name);
+  if (v === null || v === undefined || String(v).trim() === '') {
+    throw new Error('Не задан ' + name + ': впишите его в отдельный файл проекта (const ' + name +
+      " = '...';) или в Настройки проекта ⚙ → Свойства скрипта.");
+  }
+  return String(v).trim();
 }
 
 function sendTelegram_(html) {
