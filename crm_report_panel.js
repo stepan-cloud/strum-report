@@ -1027,12 +1027,12 @@
       repCell('fio', report.fio),
       resCell(compareName(crmName, report.fio))));
 
-    // Километраж
+    // Километраж: в названии строки — тип рейса («Минск», «Межгород»); если тип не задан — «Километраж»
+    const withKm = v => show(v) === '—' ? '—' : `${v} км.`;
     rows.push(el('tr', null,
-      el('td', { class: 'srp-param' }, 'Километраж'),
-      el('td', null, show(crmKm),
-        routeType && routeType.value ? [el('br'), el('span', { class: 'srp-sub' }, routeType.text)] : null),
-      repCell('km', report.km),
+      el('td', { class: 'srp-param' }, routeType && routeType.value ? routeType.text : 'Километраж'),
+      el('td', null, withKm(crmKm)),
+      repCell('km', withKm(report.km)),
       resCell(compareKm(crmKm, report.km, routeType))));
 
     // Точки, не загруженные, не сданные — свои строки, общий результат (ячейка на все строки).
