@@ -340,7 +340,7 @@
     return BAD('Разные водители');
   }
 
-  /** Допуск по типу рейса: в пределах — зелёный, больше — красный */
+  /** Допуск по типу рейса: ровно — зелёный, в пределах — жёлтый, больше — красный */
   function compareKm(crm, rep, type) {
     const c = num(crm), r = num(rep);
     if (c === null) return NONE('Нет км в CRM');
@@ -362,7 +362,7 @@
     const tol = round(c * t.pct / 100 + t.km);
     const rule = `${type.text}: ${t.pct}%${t.km ? ` + ${t.km} км` : ''} = ${tol} км`;
     return Math.abs(diff) <= tol
-      ? OK(`В допуске: ${d} — допуск ${rule}`)
+      ? WARN(`В допуске: ${d} — допуск ${rule}`)
       : BAD(`Допуск превышен на ${round(Math.abs(diff) - tol)} км — расхождение ${d}, допуск ${rule}`);
   }
 
