@@ -107,6 +107,33 @@
       return { value: s.value, text: o ? o.text.trim() : '' };
     },
 
+    /** Статус рейса: поле «Статус» select#rt_status → { value: 'loaded' | 'done' | ..., text: 'Загружен' } */
+    getRouteStatus() {
+      const s = document.getElementById('rt_status');
+      if (s) {
+        const o = s.options[s.selectedIndex];
+        return { value: s.value, text: o ? o.text.trim() : s.value };
+      }
+      const r = window._route;   // запасной вариант — данные рейса, которые держит сама CRM
+      if (!r || !r.status) return null;
+      return { value: r.status, text: typeof window.rtStName === 'function' ? window.rtStName(r.status) : r.status };
+    },
+
+    /**
+     * Поменять статус рейса и сохранить. Без подтверждения (как «Статус» и «КМ»).
+     * Сохраняем функцией самой CRM rtStep(id, статус) — ей пользуется кнопка «🏁 Завершить рейс»:
+     * она шлёт на сервер только статус (остальное — как сейчас в рейсе на сервере), не трогая
+     * несохранённые правки формы, и перерисовывает страницу — поле «Статус» покажет новый статус.
+     */
+    async setRouteStatus(value) {
+      if (typeof window.rtStep !== 'function') throw new Error('Не нашёл в CRM функцию смены статуса рейса — ничего не менял.');
+      if (String(window._routeId) !== String(ROUTE_ID))
+        throw new Error(`Открыт другой рейс (${window._routeId}), а отчёт — по рейсу ${ROUTE_ID}. Ничего не менял.`);
+      await window.rtStep(window._routeId, value);   // ошибки сервера CRM показывает сама и не бросает
+      return waitFor(() => { const st = CRM.getRouteStatus(); return st && st.value === value ? st : null; },
+        6000, 'Статус рейса не поменялся — проверьте поле «Статус».');
+    },
+
     /** Длина маршрута, км */
     getKm() {
       const i = kmInput();
@@ -385,7 +412,7 @@
       const msgs = [];
       if (!same(c.ns, r.ns)) msgs.push(`Не сданы: CRM ${listT(c.ns)}, отчёт ${listT(r.ns)}`);
       if (!same(c.nl, r.nl)) msgs.push(`Не загружены: CRM ${listT(c.nl)}, отчёт ${listT(r.nl)}`);
-      return BAD(msgs.join('; '));
+      return WARN(msgs.join('; '));   // статусы не совпадают — жёлтый (так решил пользователь)
     }
 
     // В CRM меньше точек ровно на число незагруженных — их убрали из маршрута
@@ -770,7 +797,11 @@
   #srp button.srp-ok:hover{background:#bbf7d0}
   #srp button.srp-bad{background:#fde8e8;border-color:#f5a3a3;color:#9b1c1c}
   #srp button.srp-bad:hover{background:#fbd0d0}
+  #srp button.srp-warn{background:#fff6d6;border-color:#f0d27a;color:#7a5a00}
+  #srp button.srp-warn:hover{background:#ffedb3}
   #srp button.srp-opt{font-weight:700;letter-spacing:.5px}
+  #srp button.srp-fin{display:flex;flex-direction:column;align-items:center;line-height:1.15;padding:2px 8px;white-space:nowrap}
+  #srp button.srp-fin small{font-size:10px;opacity:.85}
   #srp .srp-body{padding:10px;max-height:70vh;overflow:auto}
   #srp.srp-collapsed .srp-body{display:none}
   #srp table{width:100%;border-collapse:collapse}
@@ -842,17 +873,50 @@
     showToast(`Опт: ${rows[optIdx].num}т (${optIdx + 1} из ${rows.length})`);
   } }, 'ОПТ');
   optBadge.style.display = 'none';
-  const head = el('div', { class: 'srp-head' }, title, optBadge, btnStatus, btnKm, btnEdit, btnHide);
+  // «Завершить» — слева в меню, под надписью — текущий статус рейса.
+  // Завершен → зелёная «Не завершать» (ставит «Не завершен»); Загружен → жёлтая; другой статус → красная.
+  const finLabel = el('span', null, 'Завершить');
+  const finStatus = el('small', null, '…');
+  let finBusy = false;
+  const btnFin = el('button', { class: 'srp-fin', onclick: async () => {
+    if (finBusy) return;
+    const st = safe(() => CRM.getRouteStatus());
+    if (!st) return showToast('Не нашёл статус рейса на странице');
+    const to = st.value === 'done' ? 'not_done' : 'done';
+    finBusy = true; btnFin.disabled = true; finStatus.textContent = '⏳';
+    try {
+      const now = await CRM.setRouteStatus(to);
+      showToast(`Статус рейса: ${st.text} → ${now.text}`);
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      finBusy = false; btnFin.disabled = false; render();
+    }
+  } }, finLabel, finStatus);
+  const head = el('div', { class: 'srp-head' }, btnFin, title, optBadge, btnStatus, btnKm, btnEdit, btnHide);
   const body = el('div', { class: 'srp-body' });
   const toast = el('div', { class: 'srp-toast' });
   const panel = el('div', { id: 'srp' }, head, body, toast);
   document.body.append(panel);
 
-  /** Кнопка меню: state 'ok' — зелёная, 'bad' — красная, '' — обычная */
+  /** Кнопка меню: state 'ok' — зелёная, 'warn' — жёлтая, 'bad' — красная, '' — обычная */
   function paintBtn(btn, state, title) {
     btn.classList.toggle('srp-ok', state === 'ok');
+    btn.classList.toggle('srp-warn', state === 'warn');
     btn.classList.toggle('srp-bad', state === 'bad');
     btn.title = title;
+  }
+
+  function paintFin() {
+    if (finBusy) return;
+    const st = safe(() => CRM.getRouteStatus());
+    btnFin.disabled = !st;
+    finLabel.textContent = st && st.value === 'done' ? 'Не завершать' : 'Завершить';
+    finStatus.textContent = st ? st.text : 'статус ?';
+    if (!st) paintBtn(btnFin, '', 'Не нашёл статус рейса на странице');
+    else if (st.value === 'done') paintBtn(btnFin, 'ok', 'Рейс завершён. Нажмите — поставить «Не завершен»');
+    else if (st.value === 'loaded') paintBtn(btnFin, 'warn', 'Рейс загружен. Нажмите — поставить «Завершен»');
+    else paintBtn(btnFin, 'bad', `Статус «${st.text}» — обычно должен быть «Загружен» или «Завершен». Нажмите — поставить «Завершен»`);
   }
 
   function reportForApply() {
@@ -903,6 +967,8 @@
     const optRows = safe(() => CRM.getOptRows()) || [];
     optBadge.style.display = optRows.length ? '' : 'none';
     optBadge.title = `В товарах есть «@табл опт»: ${optRows.map(r => r.num + 'т').join(', ')}. Нажмите — показать`;
+
+    paintFin();
 
     // Цвет кнопок: зелёная — в CRM уже как в отчёте, красная — отличается
     const repKm = num(report.km);
