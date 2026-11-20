@@ -1,5 +1,6 @@
 /**
- * Бот для водителей — этап 1: хранилище, опрос Telegram раз в минуту, журнал событий.
+ * Бот для водителей. Этап 1: хранилище, опрос Telegram раз в минуту, журнал событий.
+ * Этап 2: регистрация водителей (/start в личке → заявка в группу с кнопками), /водители — список и удаление.
  * Файл лежит в том же проекте Apps Script, что и telegram_report.gs. Токен берётся оттуда же (secret_).
  * Все имена здесь начинаются с bot / BOT_, чтобы не совпасть с другими файлами проекта.
  *
@@ -122,9 +123,17 @@ function botPoll() {
     const ss = botBook_();
     if (updates.length) {
       const rows = updates.map(botLogRow_);
+      // Разбор событий. Ошибка в одном событии не мешает остальным — она пишется в журнал.
+      updates.forEach((u, i) => {
+        try {
+          botHandle_(u, ss);
+        } catch (e) {
+          rows[i][8] += '  ⚠️ ОШИБКА: ' + e.message;
+          console.error('Событие ' + u.update_id + ': ' + (e.stack || e.message));
+        }
+      });
       const sh = botSheet_(ss, 'log');
       sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows.map(r => r.map(botCell_)));
-      // Здесь на следующих этапах будет разбор событий (регистрация, реакции, переписка).
       props.setProperty(BOT_P.offset, String(updates[updates.length - 1].update_id + 1));
       console.log('Новых событий: ' + rows.length + '\n' +
         rows.map(r => '  ' + r[2] + ' | чат ' + r[3] + ' ' + r[4] + ' | ' + r[5] + ' | ' + r[8]).join('\n'));
@@ -134,6 +143,310 @@ function botPoll() {
     }
   } finally {
     lock.releaseLock();
+  }
+}
+
+
+// ===== РАЗБОР СОБЫТИЙ =====
+
+/** Одно событие Telegram. */
+function botHandle_(u, ss) {
+  if (u.message) botOnMessage_(u.message, ss);
+  else if (u.callback_query) botOnButton_(u.callback_query, ss);
+  // message_reaction — этап 4.
+}
+
+/** Сообщение: из админ-чата — команды, из личного чата — водитель. Прочие чаты не слушаем. */
+function botOnMessage_(m, ss) {
+  if (!m.from || m.from.is_bot) return;
+  const text = String(m.text || '').trim();
+  if (String(m.chat.id) === botAdminChat_()) {
+    if (/^\/(водители|drivers)(@\w+)?$/i.test(text)) {
+      const list = botListView_(botDrivers_(ss), '');
+      botSend_(botAdminChat_(), list.text, list.markup);
+    }
+    return;  // регистрация из админ-чата не принимается; ответы водителям — этап 5
+  }
+  if (m.chat.type === 'private') botOnDriverMessage_(m, text, ss);
+}
+
+
+// ===== РЕГИСТРАЦИЯ ВОДИТЕЛЕЙ =====
+
+// Статусы в листе «Водители». Отчёты получает только «подключён».
+const BOT_ST = {
+  askName: 'ввод имени',  // нажал «Старт», ждём фамилию и имя
+  pending: 'ожидает',     // заявка в админ-чате
+  active: 'подключён',
+  rejected: 'отклонён',
+  deleted: 'удалён',      // удалили через /водители
+  replaced: 'заменён',    // вместо него подключили новый аккаунт с теми же фамилией и именем
+};
+
+const BOT_TXT = {
+  askName: 'Здравствуйте! Напишите, пожалуйста, фамилию и имя, например: Иванов Иван',
+  badName: 'Напишите фамилию и имя через пробел, например: Иванов Иван',
+  sent: 'Заявка отправлена, ждите подтверждения.',
+  accepted: '✅ Вы подключены. Сюда будут приходить копии ваших отчётов.',
+  rejected: '❌ Заявка отклонена.',
+  start: 'Чтобы подключиться к боту, нажмите /start',
+  hint: 'Чтобы написать по маршруту, нажмите «Ответить» на отчёт.',
+};
+
+/** Сообщение в личном чате с ботом. */
+function botOnDriverMessage_(m, text, ss) {
+  const drivers = botDrivers_(ss);
+  const id = String(m.from.id);
+  let me = drivers.find(d => d.id === id);
+  const uname = m.from.username || '';
+  if (me && me.username !== uname) {  // username в Telegram сменили — обновим
+    me.username = uname;
+    botSaveDriver_(ss, me);
+  }
+
+  if (/^\/start(\s|$)/.test(text)) {
+    if (me && me.status === BOT_ST.active) {
+      botSend_(id, 'Вы уже подключены: <b>' + esc_(botFullName_(me)) + '</b>.');
+    } else if (me && me.status === BOT_ST.pending) {
+      botSend_(id, BOT_TXT.sent);
+    } else {
+      if (!me) me = { id: id, last: '', first: '', username: uname };
+      me.status = BOT_ST.askName;
+      me.date = new Date();
+      botSaveDriver_(ss, me);
+      botSend_(id, BOT_TXT.askName);
+    }
+    return;
+  }
+
+  if (me && me.status === BOT_ST.askName) {
+    const name = botParseName_(text);
+    if (!name) {
+      botSend_(id, BOT_TXT.badName);
+      return;
+    }
+    me.last = name.last;
+    me.first = name.first;
+    me.status = BOT_ST.pending;
+    me.date = new Date();
+    botSaveDriver_(ss, me);
+    botSend_(id, BOT_TXT.sent);
+    botSendRequest_(me, drivers, m.from);
+    return;
+  }
+
+  if (me && me.status === BOT_ST.pending) botSend_(id, BOT_TXT.sent);
+  else if (me && me.status === BOT_ST.active) botSend_(id, BOT_TXT.hint);  // переписка — этап 5
+  else botSend_(id, BOT_TXT.start);
+}
+
+/**
+ * «иванов  иван иванович» → { last: 'Иванов', first: 'Иван' } (отчество не храним).
+ * Нужно 2–3 слова из букв (можно с дефисом или апострофом), иначе null.
+ */
+function botParseName_(text) {
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 3) return null;
+  const ok = words.every(w => /^[A-Za-zА-Яа-яЁёІіЎў]+([-'’][A-Za-zА-Яа-яЁёІіЎў]+)*$/.test(w) &&
+    w.replace(/[-'’]/g, '').length >= 2);
+  if (!ok) return null;
+  const nice = w => w.split('-').map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join('-');
+  return { last: nice(words[0]), first: nice(words[1]) };
+}
+
+/** Заявка в админ-чат с кнопками. Учитывает уже подключённых с такими же фамилией (и именем). */
+function botSendRequest_(d, drivers, from) {
+  const others = drivers.filter(o => o.status === BOT_ST.active && o.id !== d.id);
+  const sameLast = others.filter(o => botNorm_(o.last) === botNorm_(d.last));
+  const same = sameLast.filter(o => botNorm_(o.first) === botNorm_(d.first));
+  const namesakes = sameLast.filter(o => same.indexOf(o) < 0);
+
+  const tgName = [from.first_name, from.last_name].filter(Boolean).join(' ');
+  const lines = [(same.length ? '⚠️ Заявка: ' : '🆕 Новый водитель: ') + botDriverHtml_(d)];
+  if (tgName) lines.push('Имя в Telegram: ' + esc_(tgName));
+  same.forEach(o => lines.push('Уже есть: ' + botDriverHtml_(o) + ' — с ' + botDate_(o.date)));
+  if (namesakes.length) {
+    lines.push('👥 однофамил' + (namesakes.length > 1 ? 'ьцы' : 'ец') + ': ' +
+      namesakes.map(o => esc_(botFullName_(o))).join(', '));
+  }
+
+  let kb;
+  if (same.length) {
+    kb = same.map(o => [{
+      text: same.length > 1 ? '🔄 Заменить ' + botShort_(o) : '🔄 Заменить старого',
+      callback_data: 'reg:rep:' + d.id + ':' + o.id,
+    }]);
+    kb.push([{ text: '➕ Это другой человек', callback_data: 'reg:ok:' + d.id }]);
+    kb.push([{ text: '❌ Отклонить', callback_data: 'reg:no:' + d.id }]);
+  } else {
+    kb = [[
+      { text: '✅ Принять', callback_data: 'reg:ok:' + d.id },
+      { text: '❌ Отклонить', callback_data: 'reg:no:' + d.id },
+    ]];
+  }
+  botSend_(botAdminChat_(), lines.join('\n'), { inline_keyboard: kb });
+}
+
+/**
+ * Нажатие кнопки. Кнопки работают только в админ-чате.
+ *   reg:ok:ID  reg:no:ID  reg:rep:НОВЫЙ:СТАРЫЙ — заявка;
+ *   del:ask:ID  del:yes:ID  del:list           — список /водители.
+ * Ответ приходит с задержкой до минуты (опрос раз в минуту), поэтому answerCallbackQuery может опоздать — не страшно.
+ */
+function botOnButton_(q, ss) {
+  const answer = text => {
+    try { botApi_('answerCallbackQuery', { callback_query_id: q.id, text: text || '' }); } catch (e) { /* опоздали */ }
+  };
+  if (!q.message || String(q.message.chat.id) !== botAdminChat_()) {
+    answer('Недоступно');
+    return;
+  }
+  const p = String(q.data || '').split(':');
+  const by = [q.from.first_name, q.from.last_name].filter(Boolean).join(' ');
+  const drivers = botDrivers_(ss);
+  const find = id => drivers.find(d => d.id === id);
+
+  if (p[0] === 'reg') {
+    const d = find(p[2]);
+    if (!d || d.status !== BOT_ST.pending) {
+      answer('Эта заявка уже обработана');
+      botCloseRequest_(q, '⏹ Заявка уже обработана' + (d ? ' — сейчас: ' + d.status : ''));
+      return;
+    }
+    let note;
+    if (p[1] === 'no') {
+      d.status = BOT_ST.rejected;
+      note = '❌ Отклонена';
+    } else {
+      d.status = BOT_ST.active;
+      note = '✅ Принят';
+      if (p[1] === 'rep') {
+        const old = find(p[3]);
+        if (old && old.status === BOT_ST.active) {
+          old.status = BOT_ST.replaced;
+          old.date = new Date();
+          botSaveDriver_(ss, old);
+          note = '🔄 Принят вместо прежнего аккаунта (' + botShort_(old) + ')';
+        }
+      }
+    }
+    d.date = new Date();
+    botSaveDriver_(ss, d);
+    try {
+      botSend_(d.id, d.status === BOT_ST.active ? BOT_TXT.accepted : BOT_TXT.rejected);
+    } catch (e) {
+      note += ' (водителю не доставлено: ' + e.message + ')';
+    }
+    answer(note);
+    botCloseRequest_(q, note + (by ? ' — ' + by : ''));
+    return;
+  }
+
+  if (p[0] === 'del') {
+    const d = p[2] ? find(p[2]) : null;
+    let view;
+    if (p[1] === 'ask' && d && d.status === BOT_ST.active) {
+      view = {
+        text: 'Удалить водителя <b>' + esc_(botFullName_(d)) + '</b>' +
+          (d.username ? ' (@' + esc_(d.username) + ')' : '') + '?\nОн перестанет получать отчёты.',
+        markup: { inline_keyboard: [[
+          { text: '🗑 Да, удалить', callback_data: 'del:yes:' + d.id },
+          { text: 'Нет', callback_data: 'del:list' },
+        ]] },
+      };
+    } else if (p[1] === 'yes' && d && d.status === BOT_ST.active) {
+      d.status = BOT_ST.deleted;
+      d.date = new Date();
+      botSaveDriver_(ss, d);
+      view = botListView_(drivers, '🗑 Удалён: <b>' + esc_(botFullName_(d)) + '</b>' + (by ? ' — ' + esc_(by) : ''));
+    } else {
+      view = botListView_(drivers, d && p[1] !== 'list' ? 'Водитель уже не подключён.' : '');
+    }
+    answer('');
+    botEdit_(q.message, view.text, view.markup);
+    return;
+  }
+  answer('');
+}
+
+/** Текст и кнопки списка /водители. */
+function botListView_(drivers, top) {
+  const byName = (a, b) => botFullName_(a).localeCompare(botFullName_(b), 'ru');
+  const active = drivers.filter(d => d.status === BOT_ST.active).sort(byName);
+  const pending = drivers.filter(d => d.status === BOT_ST.pending).sort(byName);
+  const lines = top ? [top, ''] : [];
+  if (active.length) {
+    lines.push('👥 Подключённые водители (' + active.length + '):');
+    active.forEach((d, i) => lines.push((i + 1) + '. ' + esc_(botFullName_(d)) +
+      (d.username ? ' (@' + esc_(d.username) + ')' : '') + ' — с ' + botDate_(d.date)));
+  } else {
+    lines.push('Подключённых водителей пока нет.');
+  }
+  if (pending.length) {
+    lines.push('', '⏳ Ждут подтверждения: ' + pending.map(d => esc_(botFullName_(d))).join(', '));
+  }
+  if (active.length) lines.push('', 'Чтобы удалить водителя, нажмите кнопку с его именем.');
+  return {
+    text: lines.join('\n'),
+    markup: { inline_keyboard: active.map(d => [{ text: '🗑 ' + botShort_(d), callback_data: 'del:ask:' + d.id }]) },
+  };
+}
+
+/** Заявка обработана: дописать итог под текстом и убрать кнопки (форматирование сохраняется). */
+function botCloseRequest_(q, note) {
+  const m = q.message;
+  const payload = {
+    chat_id: m.chat.id, message_id: m.message_id,
+    text: (m.text || '') + '\n\n' + note,
+    link_preview_options: { is_disabled: true },
+  };
+  if (m.entities) payload.entities = m.entities;
+  try { botApi_('editMessageText', payload); } catch (e) { /* текст не изменился — не страшно */ }
+}
+
+/** Водитель для подписи в админ-чате: «<b>Иванов Иван</b> (@ivan)» или ссылка на профиль, если нет username. */
+function botDriverHtml_(d) {
+  const name = '<b>' + esc_(botFullName_(d)) + '</b>';
+  return d.username
+    ? name + ' (@' + esc_(d.username) + ')'
+    : name + ' (<a href="tg://user?id=' + esc_(d.id) + '">профиль</a>, без username)';
+}
+
+function botFullName_(d) { return [d.last, d.first].filter(Boolean).join(' '); }
+function botShort_(d) { return botFullName_(d) + (d.username ? ' @' + d.username : ''); }
+
+/** Для сравнения имён: без регистра, ё = е. */
+function botNorm_(s) { return String(s || '').trim().toLowerCase().replace(/ё/g, 'е'); }
+
+function botDate_(v) {
+  return v instanceof Date ? Utilities.formatDate(v, TIMEZONE, 'dd.MM.yyyy') : String(v || '');
+}
+
+
+// ===== ХРАНИЛИЩЕ: ВОДИТЕЛИ =====
+
+/** Все строки листа «Водители» (по одной на Telegram-аккаунт). row — номер строки в листе. */
+function botDrivers_(ss) {
+  const sh = botSheet_(ss, 'drivers');
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return [];
+  return sh.getRange(2, 1, n, 6).getValues()
+    .map((r, i) => ({
+      row: i + 2, id: String(r[0]).trim(), last: String(r[1]), first: String(r[2]),
+      username: String(r[3]).replace(/^@/, ''), status: String(r[4]), date: r[5],
+    }))
+    .filter(d => d.id);
+}
+
+/** Записывает водителя в его строку (или новой строкой). */
+function botSaveDriver_(ss, d) {
+  const sh = botSheet_(ss, 'drivers');
+  const row = [d.id, d.last, d.first, d.username, d.status, d.date || new Date()].map(botCell_);
+  if (d.row) {
+    sh.getRange(d.row, 1, 1, row.length).setValues([row]);
+  } else {
+    sh.appendRow(row);
+    d.row = sh.getLastRow();
   }
 }
 
@@ -253,6 +566,30 @@ function botSheet_(ss, key) {
     sh.setFrozenRows(1);
   }
   return sh;
+}
+
+/** ID админ-чата (группы) — CHAT_ID из файла настроек. */
+function botAdminChat_() { return String(secret_('CHAT_ID')); }
+
+/** Сообщение в чат (HTML). markup — кнопки { inline_keyboard: [...] }. Возвращает message_id. */
+function botSend_(chatId, html, markup, extra) {
+  const payload = Object.assign({
+    chat_id: chatId, text: html, parse_mode: 'HTML', link_preview_options: { is_disabled: true },
+  }, extra || {});
+  if (markup && markup.inline_keyboard && markup.inline_keyboard.length) payload.reply_markup = markup;
+  return botApi_('sendMessage', payload).message_id;
+}
+
+/** Заменяет текст и кнопки сообщения бота. */
+function botEdit_(msg, html, markup) {
+  const payload = {
+    chat_id: msg.chat.id, message_id: msg.message_id,
+    text: html, parse_mode: 'HTML', link_preview_options: { is_disabled: true },
+  };
+  if (markup && markup.inline_keyboard && markup.inline_keyboard.length) payload.reply_markup = markup;
+  try { botApi_('editMessageText', payload); } catch (e) {
+    if (!/not modified/.test(e.message)) throw e;
+  }
 }
 
 /** Вызов Telegram Bot API. Возвращает result или бросает ошибку с описанием. */
