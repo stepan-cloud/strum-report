@@ -140,6 +140,18 @@
         6000, 'Статус рейса не поменялся — проверьте поле «Статус».');
     },
 
+    /**
+     * «Итого водителю» (BYN) — число с сервера CRM: window._route.pay.to_pay; на экране — div.rt-itog «BYN 1 234».
+     * null — если на странице его нет или открыт другой рейс.
+     */
+    getDriverPay() {
+      if (String(window._routeId) !== String(ROUTE_ID)) return null;
+      const p = window._route && window._route.pay;
+      if (p && p.to_pay !== null && p.to_pay !== undefined && p.to_pay !== '' && isFinite(+p.to_pay)) return +p.to_pay;
+      const box = document.querySelector('.rt-itog');
+      return box ? num(box.textContent.replace(/[^\d.,\s-]/g, '')) : null;
+    },
+
     /** Длина маршрута, км */
     getKm() {
       const i = kmInput();
@@ -324,6 +336,13 @@
     cm: params.get('cm') || '',
   };
   CURRENCIES.forEach(c => { originalReport[c] = params.get(c.toLowerCase()) || ''; });
+
+  // Бот: «маршрут завершён» водителю. k — подпись рейса, bot — путь веб-приложения Apps Script («macros/s/…»).
+  // В ссылках из старых отчётов их нет — тогда водителю из окна не написать.
+  const BOT_KEY = params.get('k') || '';
+  const BOT_PATH = params.get('bot') || '';
+  const BOT_URL = BOT_KEY && /^(a\/macros\/[\w.-]+|macros)\/s\/[\w-]+$/.test(BOT_PATH)
+    ? `https://script.google.com/${BOT_PATH}/exec` : '';
 
   // Правки хранятся только для этой конкретной ссылки: новый отчёт — чистые данные
   const STORE_KEY = STORE + ROUTE_ID + ':' + location.search;
@@ -810,11 +829,11 @@
   }
 
   let toastTimer;
-  function showToast(msg) {
+  function showToast(msg, ms) {
     toast.textContent = msg;
     toast.classList.add('on');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toast.classList.remove('on'), 1500);
+    toastTimer = setTimeout(() => toast.classList.remove('on'), ms || 1500);
   }
 
   // =====================================================================
@@ -924,16 +943,49 @@
     if (!st) return showToast('Не нашёл статус рейса на странице');
     const to = st.value === 'done' ? 'not_done' : 'done';
     finBusy = true; btnFin.disabled = true; finStatus.textContent = '⏳';
+    let done = false;
     try {
       const now = await CRM.setRouteStatus(to);
       showToast(`Статус рейса: ${st.text} → ${now.text}`);
+      done = now.value === 'done';
     } catch (e) {
-      showToast(e.message);
+      showToast(e.message, 5000);
     } finally {
       finBusy = false; btnFin.disabled = false; render();
     }
+    if (done) notifyDriver(`Статус рейса: ${st.text} → Завершен.`);
   } }, finLabel, finStatus);
-  const head = el('div', { class: 'srp-head' }, btnFin, title, optBadge, btnStatus, btnKm, btnEdit, btnHide);
+  // 📨 — видна у завершённого рейса: ещё раз попросить бота написать водителю (бот не повторит то же «Итого»)
+  let sendBusy = false;
+  const btnSend = el('button', { class: 'srp-icon', onclick: () => notifyDriver('') }, '📨');
+  btnSend.style.display = 'none';
+
+  /**
+   * Бот пишет водителю «Маршрут №… завершён. Итого водителю: BYN …» (ответом на его копию отчёта).
+   * Запрос — к веб-приложению Apps Script (driver_bot.gs, doPost); итог — подсказкой внизу окна.
+   */
+  async function notifyDriver(prefix) {
+    const say = (msg, ms) => showToast((prefix ? prefix + ' ' : '') + msg, ms || 7000);
+    if (!BOT_URL) return say('Водителю не сообщено: ссылка из старого отчёта (нет данных бота).');
+    if (sendBusy) return;
+    const pay = safe(() => CRM.getDriverPay());
+    if (pay === null) return say('Водителю не сообщено: не нашёл «Итого водителю» на странице. Повторить — 📨');
+    sendBusy = true; btnSend.disabled = true; btnSend.textContent = '⏳';
+    say('Пишу водителю…', 20000);
+    try {
+      // text/plain — простой запрос, браузер отправляет его на другой сайт без предварительной проверки
+      const res = await fetch(BOT_URL, { method: 'POST', body: JSON.stringify({ action: 'done', route: ROUTE_ID, k: BOT_KEY, pay }) });
+      const d = await res.json();
+      if (!d.ok) say(`⚠️ ${d.error || 'Бот не ответил'}`, 10000);
+      else if (d.already) say(`ℹ️ Водителю (${d.driver}) уже сообщено: итого ${d.sum}`);
+      else say(`📨 Водителю (${d.driver}) отправлено: маршрут завершён, итого ${d.sum}`);
+    } catch (e) {
+      say(`⚠️ Бот не ответил (${e.message}). Повторить — 📨`, 10000);
+    } finally {
+      sendBusy = false; btnSend.disabled = false; btnSend.textContent = '📨';
+    }
+  }
+  const head = el('div', { class: 'srp-head' }, btnFin, btnSend, title, optBadge, btnStatus, btnKm, btnEdit, btnHide);
   const body = el('div', { class: 'srp-body' });
   const toast = el('div', { class: 'srp-toast' });
   const panel = el('div', { id: 'srp' }, head, body, toast);
@@ -950,6 +1002,10 @@
   function paintFin() {
     if (finBusy) return;
     const st = safe(() => CRM.getRouteStatus());
+    btnSend.style.display = st && st.value === 'done' ? '' : 'none';
+    btnSend.title = BOT_URL
+      ? 'Написать водителю «маршрут завершён» с «Итого водителю» из CRM (то же итого повторно не уйдёт)'
+      : 'Ссылка из старого отчёта — водителю отсюда не написать';
     btnFin.disabled = !st;
     finLabel.textContent = st && st.value === 'done' ? 'Не завершать' : 'Завершить';
     finStatus.textContent = st ? st.text : 'статус ?';

@@ -2,6 +2,7 @@
  * Бот для водителей. Этап 1: хранилище, опрос Telegram раз в минуту, журнал событий.
  * Этап 2: регистрация водителей (/start в личке → заявка в группу с кнопками), /водители — список и удаление.
  * Этап 3: копия отчёта водителю (botAfterReport_ зовёт telegram_report.gs), /водитель ответом на отчёт.
+ * Этап 4: «маршрут завершён» с итогом водителю — его присылает окно сверки в CRM через веб-приложение (doPost).
  * Файл лежит в том же проекте Apps Script, что и telegram_report.gs. Токен берётся оттуда же (secret_).
  * Все имена здесь начинаются с bot / BOT_, чтобы не совпасть с другими файлами проекта.
  *
@@ -10,23 +11,29 @@
  *   2) botPoll()         — можно запускать вручную: забирает новые события Telegram в лист «Журнал».
  *   3) botShowChats()    — показывает, из каких чатов приходили события, с их ID (так узнаём ID группы).
  *   4) botStartPolling() — включает опрос: botPoll раз в минуту. botStopPolling() — выключает.
+ *   5) Веб-приложение (для «маршрут завершён»): Развернуть → Новое развертывание → Веб-приложение,
+ *      запуск от моего имени, доступ «Все». Адрес …/exec — в свойство скрипта BOT_WEBAPP_URL.
+ *      После каждой правки кода: Управление развертываниями → ✎ → Версия «Новая» (иначе работает старый код).
  */
 
 // Свойства скрипта, в которых бот хранит своё состояние.
 const BOT_P = {
   sheet: 'BOT_SHEET_ID',   // ID таблицы-хранилища
   offset: 'BOT_OFFSET',    // с какого события продолжать опрос getUpdates
-  due: 'BOT_NEXT_DUE',     // время (мс) ближайшего отложенного дела: реакции, удаления (этапы 4 и 6)
+  due: 'BOT_NEXT_DUE',     // время (мс) ближайшего отложенного дела: удаление старых сообщений (этап 6)
+  webApp: 'BOT_WEBAPP_URL', // адрес веб-приложения …/exec — его вписывает пользователь после развёртывания
+  linkKey: 'BOT_LINK_KEY',  // секрет для подписи рейса в ссылке на CRM (создаётся сам, никому не нужен)
 };
 
-// Какие события просим у Telegram. message_reaction приходит, только если он указан здесь явно.
-const BOT_UPDATES = ['message', 'message_reaction', 'callback_query'];
+// Какие события просим у Telegram. Реакции не нужны (решено на этапе 4) — их не просим.
+const BOT_UPDATES = ['message', 'callback_query'];
 
 // Листы таблицы-хранилища. Заголовки пишутся, только если лист пустой.
 const BOT_SHEETS = {
   drivers: { name: 'Водители', head: ['Telegram ID', 'Фамилия', 'Имя', 'Username', 'Статус', 'Дата'] },
-  messages: { name: 'Сообщения', head: ['chat_id', 'message_id', 'Маршрут', 'Отчёт', 'Водитель', 'Дата', 'Удалено'] },
-  reactions: { name: 'Реакции', head: ['chat_id', 'message_id', 'Кто', 'Реакция', 'Время'] },
+  messages: {
+    name: 'Сообщения', head: ['chat_id', 'message_id', 'Маршрут', 'Отчёт', 'Водитель', 'Дата', 'Удалено', 'Что'],
+  },
   log: {
     name: 'Журнал',
     head: ['Время', 'update_id', 'Тип', 'Чат ID', 'Чат', 'Кто', 'Сообщение ID', 'Ответ на ID', 'Что', 'JSON'],
@@ -140,7 +147,7 @@ function botPoll() {
         rows.map(r => '  ' + r[2] + ' | чат ' + r[3] + ' ' + r[4] + ' | ' + r[5] + ' | ' + r[8]).join('\n'));
     }
     if (dueNow) {
-      props.deleteProperty(BOT_P.due);  // отложенные дела появятся на этапах 4 и 6
+      props.deleteProperty(BOT_P.due);  // отложенные дела (удаление старых сообщений) появятся на этапе 6
     }
   } finally {
     lock.releaseLock();
@@ -154,7 +161,6 @@ function botPoll() {
 function botHandle_(u, ss) {
   if (u.message) botOnMessage_(u.message, ss);
   else if (u.callback_query) botOnButton_(u.callback_query, ss);
-  // message_reaction — этап 4.
 }
 
 /** Сообщение: из админ-чата — команды, из личного чата — водитель. Прочие чаты не слушаем. */
@@ -529,7 +535,7 @@ function botSendCopy_(ss, msgs, driver, content, route, reportId) {
     chat_id: driver.id, link_preview_options: { is_disabled: true },
   }, content));
   const row = { chat: driver.id, id: String(sent.message_id), route: route, report: String(reportId),
-    driver: driver.id, date: new Date(), deleted: '' };
+    driver: driver.id, date: new Date(), deleted: '', kind: BOT_KIND.copy };
   botSaveMessage_(ss, row);
   msgs.push(row);
   botLinkReport_(ss, msgs, reportId, route, driver.id);
@@ -541,7 +547,8 @@ function botLinkReport_(ss, msgs, reportId, route, driverId) {
   const id = String(reportId);
   let row = msgs.find(x => x.chat === admin && x.id === id);
   if (!row) {
-    row = { chat: admin, id: id, route: route, report: id, driver: driverId, date: new Date(), deleted: '' };
+    row = { chat: admin, id: id, route: route, report: id, driver: driverId, date: new Date(), deleted: '',
+      kind: BOT_KIND.report };
     msgs.push(row);
   } else {
     if (row.driver === driverId && row.route) return;
@@ -549,6 +556,123 @@ function botLinkReport_(ss, msgs, reportId, route, driverId) {
     if (!row.route) row.route = route;
   }
   botSaveMessage_(ss, row);
+}
+
+
+// ===== МАРШРУТ ЗАВЕРШЁН =====
+// В окне сверки в CRM нажали «Завершить» → окно шлёт сюда (веб-приложение, doPost) номер рейса, подпись
+// из ссылки и «Итого водителю» из CRM → бот пишет водителю ответом на его копию отчёта, в группу — отметку.
+// Подпись k = HMAC(рейс, BOT_LINK_KEY) стоит в ссылке на CRM в отчёте: без ссылки из группы сообщение
+// водителю не отправить, а ключей в публичном коде окна сверки нет.
+
+// Что за сообщение — столбец «Что» листа «Сообщения».
+const BOT_KIND = { report: 'отчёт', copy: 'копия', done: 'итог' };
+
+/**
+ * Параметры для ссылки на CRM в отчёте: { k: подпись рейса, bot: путь веб-приложения «macros/s/…» }.
+ * Веб-приложение не развёрнуто (нет BOT_WEBAPP_URL) — {}: ссылка как раньше, окно сверки просто не сможет
+ * написать водителю. Никогда не бросает ошибку — отчёт важнее.
+ */
+function botLinkParams_(route) {
+  try {
+    const url = String(PropertiesService.getScriptProperties().getProperty(BOT_P.webApp) || '').trim();
+    const m = url.match(/^https:\/\/script\.google\.com\/((?:a\/macros\/[\w.-]+|macros)\/s\/[\w-]+)\/exec\b/);
+    if (!m || !route) return {};
+    return { k: botLinkKey_(route), bot: m[1] };
+  } catch (e) {
+    console.error('Бот: подпись для ссылки не получилась: ' + (e.stack || e.message));
+    return {};
+  }
+}
+
+/** Подпись рейса: первые 22 знака HMAC-SHA256(рейс, BOT_LINK_KEY). Ключ создаётся сам при первом вызове. */
+function botLinkKey_(route) {
+  const props = PropertiesService.getScriptProperties();
+  let key = props.getProperty(BOT_P.linkKey);
+  if (!key) {
+    key = Utilities.getUuid() + Utilities.getUuid();
+    props.setProperty(BOT_P.linkKey, key);
+  }
+  const sig = Utilities.computeHmacSha256Signature(String(route), key);
+  return Utilities.base64EncodeWebSafe(sig).replace(/=+$/, '').slice(0, 22);
+}
+
+/**
+ * Веб-приложение: запрос из окна сверки. Тело — JSON { action: 'done', route, k, pay }.
+ * Ответ — JSON { ok, driver, sum, already } или { ok: false, error }.
+ */
+function doPost(e) {
+  let res;
+  try {
+    const q = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    if (q.action !== 'done') throw new Error('Неизвестный запрос');
+    res = botRouteDone_(q);
+  } catch (err) {
+    console.error('Бот, веб-приложение: ' + (err.stack || err.message));
+    res = { ok: false, error: err.message };
+  }
+  return ContentService.createTextOutput(JSON.stringify(res)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * «Маршрут завершён» водителю. Водитель — тот, кому ушла копия последнего отчёта по этому рейсу.
+ * То же «Итого» этому водителю уже отправляли — повторно не шлёт (already: true).
+ */
+function botRouteDone_(q) {
+  const route = String(q.route || '').trim();
+  if (!route || String(q.k || '') !== botLinkKey_(route)) {
+    return { ok: false, error: 'Ссылка не подходит к этому рейсу — откройте рейс по ссылке из отчёта в группе.' };
+  }
+  const pay = Number(q.pay);
+  if (q.pay === null || q.pay === undefined || q.pay === '' || !isFinite(pay)) {
+    return { ok: false, error: 'Нет суммы «Итого водителю» — водителю не отправлено.' };
+  }
+  const lock = LockService.getScriptLock();
+  const locked = lock.tryLock(20000);  // botPoll мог как раз писать в таблицу — подождём
+  try {
+    const ss = botBook_();
+    const admin = botAdminChat_();
+    const msgs = botMessages_(ss);
+    const reports = msgs.filter(x => x.chat === admin && x.id === x.report && x.route === route);
+    const report = reports.filter(x => x.driver).pop();  // строки идут по времени — последний отчёт с водителем
+    if (!report) {
+      return { ok: false, error: reports.length
+        ? 'Копия отчёта никому не отправлена — сначала ответьте на отчёт в группе: /водитель Фамилия.'
+        : 'Отчёта по рейсу №' + route + ' нет в боте — водителю не отправлено.' };
+    }
+    const driver = botDrivers_(ss).find(d => d.id === report.driver);
+    if (!driver || driver.status !== BOT_ST.active) {
+      return { ok: false, error: 'Водитель ' + (driver ? botFullName_(driver) + ' ' : '') +
+        'больше не подключён к боту — не отправлено.' };
+    }
+    const name = botFullName_(driver);
+    const sum = 'BYN ' + botMoney_(pay);
+    const kind = BOT_KIND.done + ' ' + sum;
+    const mine = msgs.filter(x => x.chat === driver.id && x.route === route && !x.deleted);
+    const last = mine.filter(x => x.kind.indexOf(BOT_KIND.done) === 0).pop();
+    if (last && last.kind === kind) return { ok: true, already: true, driver: name, sum: sum };
+
+    // Ответом на копию этого отчёта (строки до этапа 4 — без «Что», это тоже копии).
+    const copy = mine.filter(x => x.report === report.id && (x.kind === BOT_KIND.copy || !x.kind)).pop();
+    const html = '🏁 Маршрут <b>№' + esc_(route) + '</b> завершён.\nИтого водителю: <b>' + esc_(sum) + '</b>';
+    const sentId = copy ? botReply_(driver.id, copy.id, html) : botSend_(driver.id, html);
+    botSaveMessage_(ss, { chat: driver.id, id: String(sentId), route: route, report: report.id,
+      driver: driver.id, date: new Date(), deleted: '', kind: kind });
+    try {
+      botReply_(admin, report.id, '🏁 Водителю отправлено «маршрут завершён», итого водителю <b>' + esc_(sum) +
+        '</b> — <b>' + esc_(name) + '</b>');
+    } catch (e) { /* водителю уже ушло — отметка в группе не главное */ }
+    return { ok: true, driver: name, sum: sum };
+  } finally {
+    if (locked) lock.releaseLock();
+  }
+}
+
+/** 1234.5 → «1 234,50», 1500 → «1 500». */
+function botMoney_(n) {
+  const v = Math.round(Number(n) * 100) / 100;
+  const parts = Math.abs(v).toFixed(2).split('.');
+  return (v < 0 ? '−' : '') + parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + (parts[1] === '00' ? '' : ',' + parts[1]);
 }
 
 
@@ -671,16 +795,17 @@ function botSaveDriver_(ss, d) {
 // ===== ХРАНИЛИЩЕ: СООБЩЕНИЯ =====
 // Лист «Сообщения» — связи сообщений с отчётами. Строка отчёта: chat_id = группа, message_id = Отчёт,
 // «Водитель» — кому ушла копия. Строка копии: chat_id = водитель, «Отчёт» — message_id отчёта в группе.
+// «Что» (BOT_KIND): отчёт / копия / «итог BYN 1 234» — сообщение «маршрут завершён». Строки до этапа 4 — пусто.
 
 /** Все строки листа «Сообщения». row — номер строки в листе. */
 function botMessages_(ss) {
   const sh = botSheet_(ss, 'messages');
   const n = sh.getLastRow() - 1;
   if (n < 1) return [];
-  return sh.getRange(2, 1, n, 7).getValues()
+  return sh.getRange(2, 1, n, 8).getValues()
     .map((r, i) => ({
       row: i + 2, chat: String(r[0]).trim(), id: String(r[1]).trim(), route: String(r[2]).trim(),
-      report: String(r[3]).trim(), driver: String(r[4]).trim(), date: r[5], deleted: r[6],
+      report: String(r[3]).trim(), driver: String(r[4]).trim(), date: r[5], deleted: r[6], kind: String(r[7]).trim(),
     }))
     .filter(x => x.chat && x.id);
 }
@@ -688,7 +813,8 @@ function botMessages_(ss) {
 /** Записывает связь в её строку (или новой строкой). */
 function botSaveMessage_(ss, x) {
   const sh = botSheet_(ss, 'messages');
-  const row = [x.chat, x.id, x.route, x.report, x.driver, x.date || new Date(), x.deleted || ''].map(botCell_);
+  const row = [x.chat, x.id, x.route, x.report, x.driver, x.date || new Date(), x.deleted || '', x.kind || '']
+    .map(botCell_);
   if (x.row) {
     sh.getRange(x.row, 1, 1, row.length).setValues([row]);
   } else {
@@ -712,12 +838,6 @@ function botLogRow_(u) {
     msgId = m.message_id;
     replyTo = m.reply_to_message ? m.reply_to_message.message_id : '';
     what = botWhat_(m);
-  } else if (u.message_reaction) {
-    const r = u.message_reaction;
-    chat = r.chat;
-    who = botWho_(r.user, r.actor_chat);
-    msgId = r.message_id;
-    what = botEmojis_(r.old_reaction) + ' → ' + botEmojis_(r.new_reaction);
   } else if (u.callback_query) {
     const q = u.callback_query;
     chat = q.message ? q.message.chat : {};
@@ -733,7 +853,7 @@ function botLogRow_(u) {
       what = botWho_(o.new_chat_member.user) + ': ' + o.old_chat_member.status + ' → ' + o.new_chat_member.status;
     }
   }
-  type = type === 'message_reaction' ? 'реакция' : type === 'callback_query' ? 'кнопка' :
+  type = type === 'callback_query' ? 'кнопка' :
     type === 'message' ? 'сообщение' : type;
   return [time, u.update_id, type, chat.id || '', botChatName_(chat), who, msgId, replyTo, what,
     JSON.stringify(u).slice(0, 45000)];
@@ -782,12 +902,6 @@ function botWhat_(m) {
   return parts.join(' ') || '[другое]';
 }
 
-function botEmojis_(list) {
-  const s = (list || []).map(r =>
-    r.type === 'emoji' ? r.emoji : r.type === 'custom_emoji' ? '[свой эмодзи]' : '[платная ⭐]').join(' ');
-  return s || 'нет';
-}
-
 /** Текст, начинающийся с = + - @, таблица приняла бы за формулу — экранируем апострофом. */
 function botCell_(v) {
   return typeof v === 'string' && /^[=+\-@]/.test(v) ? "'" + v : v;
@@ -811,6 +925,8 @@ function botSheet_(ss, key) {
   if (sh.getLastRow() === 0) {
     sh.getRange(1, 1, 1, def.head.length).setValues([def.head]).setFontWeight('bold');
     sh.setFrozenRows(1);
+  } else if (sh.getLastColumn() < def.head.length) {  // в листе ещё нет новых столбцов — дописать заголовок
+    sh.getRange(1, 1, 1, def.head.length).setValues([def.head]).setFontWeight('bold');
   }
   return sh;
 }

@@ -167,7 +167,9 @@ function buildMessage_(d, forDriver) {
   const date = Utilities.formatDate(d.timestamp, TIMEZONE, 'dd.MM.yyyy');
   const time = Utilities.formatDate(d.timestamp, TIMEZONE, 'HH.mm.ss');
 
-  // --- Ссылка на CRM с дополнительными данными (в копии водителю её нет)
+  // --- Ссылка на CRM с дополнительными данными (в копии водителю её нет).
+  // k и bot — чтобы окно сверки могло попросить бота написать водителю «маршрут завершён» (driver_bot.gs).
+  const bot = forDriver || typeof botLinkParams_ !== 'function' ? {} : botLinkParams_(routeId);
   const link = forDriver ? '' : buildCrmLink_(routeId, {
     fio: clean(d.name),
     pts: totalPoints || '',
@@ -179,6 +181,8 @@ function buildMessage_(d, forDriver) {
     eur: money.EUR,
     rub: money.RUB,
     cm: comment,
+    k: bot.k || '',
+    bot: bot.bot || '',
   });
 
   const withT = arr => arr.map(n => n + 'т').join(', ');
@@ -210,7 +214,8 @@ function buildMessage_(d, forDriver) {
  * Доп. данные идут ДО знака #, чтобы не мешать CRM открывать маршрут.
  * Пустые параметры не добавляются.
  *   fio — ФИО, pts — всего точек, ns — не сданы, nl — не загружены,
- *   km — км, byn/usd/eur/rub — суммы, cm — комментарий.
+ *   km — км, byn/usd/eur/rub — суммы, cm — комментарий,
+ *   k — подпись рейса, bot — путь веб-приложения бота («macros/s/…») для «маршрут завершён».
  */
 function buildCrmLink_(routeId, data) {
   const base = CRM_ROUTE_URL.split('#')[0];       // https://strum-crm.onrender.com/
