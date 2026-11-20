@@ -42,11 +42,17 @@
     return id ? id.padStart(6, '0') : null;
   }
 
-  /** Текст «Пометки к заказу» в строке: div рядом с кнопкой ✏️; null — если ячейку не нашли */
+  /**
+   * Текст «Пометки к заказу» в строке: div рядом с кнопкой ✏️; null — если ячейку не нашли.
+   * Пустую пометку CRM рисует серым прочерком <span style="color:var(--muted)">—</span>
+   * (настоящий текст пометки вставляется экранированным, без тегов) — это пустая строка.
+   */
   function rowNote(tr) {
     const pencil = tr && tr.querySelector('button[title="Поправить пометку к заказу"]');
     const div = pencil && pencil.parentElement && [...pencil.parentElement.children].find(e => e.tagName === 'DIV');
-    return div ? div.textContent : null;
+    if (!div) return null;
+    if (div.querySelector('span') && div.textContent.trim() === '—') return '';
+    return div.textContent;
   }
 
   /** Строки таблицы «Заказы в рейсе», по порядку объезда */
