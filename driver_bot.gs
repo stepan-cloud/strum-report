@@ -1,6 +1,7 @@
 /**
  * Бот для водителей. Этап 1: хранилище, опрос Telegram раз в минуту, журнал событий.
  * Этап 2: регистрация водителей (/start в личке → заявка в группу с кнопками), /водители — список и удаление.
+ * Этап 3: копия отчёта водителю (botAfterReport_ зовёт telegram_report.gs), /водитель ответом на отчёт.
  * Файл лежит в том же проекте Apps Script, что и telegram_report.gs. Токен берётся оттуда же (secret_).
  * Все имена здесь начинаются с bot / BOT_, чтобы не совпасть с другими файлами проекта.
  *
@@ -164,7 +165,10 @@ function botOnMessage_(m, ss) {
     if (/^\/(водители|drivers)(@\w+)?$/i.test(text)) {
       const list = botListView_(botDrivers_(ss), '');
       botSend_(botAdminChat_(), list.text, list.markup);
+      return;
     }
+    const cmd = text.match(/^\/(водитель|driver)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+    if (cmd) botOnDriverCmd_(m, String(cmd[2] || '').trim(), ss);
     return;  // регистрация из админ-чата не принимается; ответы водителям — этап 5
   }
   if (m.chat.type === 'private') botOnDriverMessage_(m, text, ss);
@@ -423,6 +427,219 @@ function botDate_(v) {
 }
 
 
+// ===== КОПИЯ ОТЧЁТА ВОДИТЕЛЮ =====
+
+/**
+ * Зовёт telegram_report.gs сразу после отправки отчёта в группу.
+ *   d — данные отчёта (как для buildMessage_), reportId — message_id отчёта в группе.
+ * Ищет водителя по ФИО, шлёт ему копию без ссылки на CRM и записывает связи в лист «Сообщения».
+ * Не нашёл ровно одного — пишет в группу ответом на отчёт, как назначить водителя командой /водитель.
+ * Никогда не бросает ошибку: отчёт в группе уже отправлен, бот ему не мешает.
+ */
+function botAfterReport_(d, reportId) {
+  const lock = LockService.getScriptLock();
+  const locked = lock.tryLock(20000);  // botPoll мог как раз писать в таблицу — подождём
+  try {
+    const ss = botBook_();
+    const route = extractRouteId_(String(d.routeRaw || '').trim());
+    const msgs = botMessages_(ss);
+    botLinkReport_(ss, msgs, reportId, route, '');
+    const match = botMatchDrivers_(botDrivers_(ss), d.name);
+    const sample = botSampleName_(d.name);
+    if (!botMatchOne_(match)) {
+      botReply_(botAdminChat_(), reportId, botMatchHint_(match, sample, 'Ответьте на отчёт:'));
+      return;
+    }
+    const driver = match.list[0];
+    try {
+      botSendCopy_(ss, msgs, driver, { text: buildMessage_(d, true), parse_mode: 'HTML' }, route, reportId);
+    } catch (e) {
+      botReply_(botAdminChat_(), reportId, '⚠️ Копия не доставлена: <b>' + esc_(botFullName_(driver)) + '</b> — ' +
+        esc_(e.message) + '\nПовторить — ответьте на отчёт: <code>/водитель ' + esc_(botFullName_(driver)) + '</code>');
+    }
+  } catch (e) {
+    console.error('Бот: копия отчёта не отправлена: ' + (e.stack || e.message));
+    try {
+      botReply_(botAdminChat_(), reportId, '⚠️ Бот: копия водителю не отправлена — ' + esc_(e.message));
+    } catch (e2) { /* ничего не поделать — ошибка уже в журнале выполнения */ }
+  } finally {
+    if (locked) lock.releaseLock();
+  }
+}
+
+/**
+ * Ответ в группе на отчёт: «/водитель Фамилия [Имя]» → копия этому водителю.
+ * Текст копии берётся из самого отчёта (без ссылки на CRM), поэтому годятся и отчёты, отправленные до этапа 3.
+ */
+function botOnDriverCmd_(m, arg, ss) {
+  const admin = botAdminChat_();
+  const reply = html => botReply_(admin, m.message_id, html);
+  const rep = m.reply_to_message ? botReportOf_(m.reply_to_message) : null;
+  if (!rep) {
+    reply('Ответьте этой командой на сам отчёт (сообщение с ФИО и ID маршрута): <code>/водитель Иванов</code>');
+    return;
+  }
+  if (!arg) {
+    reply('Напишите фамилию водителя: <code>/водитель Иванов</code> (можно с именем: <code>/водитель Иванов Иван</code>)');
+    return;
+  }
+  const match = botMatchDrivers_(botDrivers_(ss), arg);
+  if (!botMatchOne_(match)) {
+    reply(botMatchHint_(match, botSampleName_(arg), 'Уточните:', arg));
+    return;
+  }
+  const driver = match.list[0];
+  const name = '<b>' + esc_(botFullName_(driver)) + '</b>';
+  const msgs = botMessages_(ss);
+  // Копия = строка в чате водителя с этим отчётом (номера сообщений у каждого чата свои — сравниваем и чат).
+  const had = msgs.some(x => x.chat === driver.id && x.report === rep.id && !x.deleted);
+  if (had) {
+    reply('ℹ️ Копия этого отчёта уже отправлена: ' + name);
+    return;
+  }
+  try {
+    botSendCopy_(ss, msgs, driver, rep.content, rep.route, rep.id);
+  } catch (e) {
+    reply('⚠️ Копия не доставлена: ' + name + ' — ' + esc_(e.message));
+    return;
+  }
+  reply('✅ Копия отправлена: ' + name);
+}
+
+/**
+ * Сообщение, на которое ответили, — это отчёт? Отчёт = сообщение бота со ссылкой на рейс в CRM (…#route/ID).
+ * Возвращает { id, route, content } (content — текст для копии: те же жирный/моноширинный, но без ссылки) или null.
+ */
+function botReportOf_(r) {
+  if (!r.from || !r.from.is_bot || !r.text) return null;
+  const ents = r.entities || [];
+  const link = ents.find(e => e.type === 'text_link' && /#route\//.test(e.url || ''));
+  if (!link) return null;
+  let route = link.url.split('#route/')[1] || '';
+  try { route = decodeURIComponent(route); } catch (e) { /* оставим как есть */ }
+  const content = { text: r.text };
+  const keep = ents.filter(e => e.type !== 'text_link');
+  if (keep.length) content.entities = keep;
+  return { id: String(r.message_id), route: route, content: content };
+}
+
+/** Шлёт копию водителю и записывает связи: копия → отчёт, отчёт → водитель. Ошибка Telegram — бросает. */
+function botSendCopy_(ss, msgs, driver, content, route, reportId) {
+  const sent = botApi_('sendMessage', Object.assign({
+    chat_id: driver.id, link_preview_options: { is_disabled: true },
+  }, content));
+  const row = { chat: driver.id, id: String(sent.message_id), route: route, report: String(reportId),
+    driver: driver.id, date: new Date(), deleted: '' };
+  botSaveMessage_(ss, row);
+  msgs.push(row);
+  botLinkReport_(ss, msgs, reportId, route, driver.id);
+}
+
+/** Строка отчёта в «Сообщения» (chat = группа, message_id = Отчёт). Есть — обновляет водителя, нет — добавляет. */
+function botLinkReport_(ss, msgs, reportId, route, driverId) {
+  const admin = botAdminChat_();
+  const id = String(reportId);
+  let row = msgs.find(x => x.chat === admin && x.id === id);
+  if (!row) {
+    row = { chat: admin, id: id, route: route, report: id, driver: driverId, date: new Date(), deleted: '' };
+    msgs.push(row);
+  } else {
+    if (row.driver === driverId && row.route) return;
+    if (driverId) row.driver = driverId;
+    if (!row.route) row.route = route;
+  }
+  botSaveMessage_(ss, row);
+}
+
+
+// ===== ПОИСК ВОДИТЕЛЯ ПО ФИО =====
+
+/**
+ * Подключённые водители, подходящие под ФИО «Фамилия Имя [Отчество]» (как в форме или в /водитель).
+ * Без учёта регистра, ё = е; опечатки как в окне сверки: расстояние Левенштейна ≤1, для слов от 7 букв ≤2.
+ * Точное совпадение фамилии важнее неточного. Если в ФИО есть имя, оно тоже проверяется (с опечатками;
+ * «И.» — инициал). Возвращает { list, nameDiff }: nameDiff — по фамилии кто-то подходит, но имя другое
+ * (тогда list — подошедшие по фамилии). Копия уходит, только если list ровно один и nameDiff = false.
+ */
+function botMatchDrivers_(drivers, fio) {
+  const words = botWords_(fio);
+  if (!words.length) return { list: [], nameDiff: false };
+  const active = drivers.filter(d => d.status === BOT_ST.active);
+  const byLast = botClosest_(active, d => d.last, words[0]);
+  if (!byLast.length || !words[1]) return { list: byLast, nameDiff: false };
+  const byFirst = botClosest_(byLast, d => d.first, words[1]);
+  return byFirst.length ? { list: byFirst, nameDiff: false } : { list: byLast, nameDiff: true };
+}
+
+function botMatchOne_(match) { return match.list.length === 1 && !match.nameDiff; }
+
+/** Из list — те, чьё поле похоже на word. Если есть точные совпадения — только они. */
+function botClosest_(list, field, word) {
+  const initial = /\./.test(word) && botClean_(word).length <= 2;  // «И.» или «И.И.»
+  const w = botClean_(word);
+  if (!w) return [];
+  const scored = list.map(d => {
+    const v = botClean_(botNorm_(field(d)));
+    let dist;
+    if (initial) dist = v.charAt(0) === w.charAt(0) ? 0 : 99;
+    else dist = botLev_(v, w) <= (Math.max(v.length, w.length) >= 7 ? 2 : 1) ? botLev_(v, w) : 99;
+    return { d: d, dist: dist };
+  }).filter(x => x.dist < 99);
+  const exact = scored.filter(x => x.dist === 0);
+  return (exact.length ? exact : scored).map(x => x.d);
+}
+
+/** Слова ФИО для сравнения: без регистра, ё = е, без лишних знаков (точки в инициалах остаются). */
+function botWords_(s) {
+  return botNorm_(s).split(/\s+/).map(w => w.replace(/[^a-zа-яіў.'’-]/g, '')).filter(w => /[a-zа-яіў]/.test(w));
+}
+
+function botClean_(w) { return String(w).replace(/[^a-zа-яіў'’-]/g, ''); }
+
+/** Расстояние Левенштейна (сколько букв вставить/удалить/заменить). */
+function botLev_(a, b) {
+  let prev = [];
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/** «иванов иван иванович» → «Иванов Иван» — образец для подсказки /водитель. */
+function botSampleName_(fio) {
+  const name = botParseName_(String(fio || '').trim().split(/\s+/).slice(0, 2).join(' '));
+  if (name) return name.last + ' ' + name.first;
+  const w = String(fio || '').trim().split(/\s+/)[0] || '';
+  return /^[A-Za-zА-Яа-яЁёІіЎў'’-]{2,}$/.test(w) ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : 'Иванов';
+}
+
+/**
+ * Подсказка в группу, когда водитель не определился однозначно.
+ *   how — «Ответьте на отчёт:» (после отчёта) или «Уточните:» (после /водитель); asked — что написали в /водитель.
+ */
+function botMatchHint_(match, sample, how, asked) {
+  const names = match.list.map(d => esc_(botFullName_(d))).join(', ');
+  const cmd = name => '<code>/водитель ' + esc_(name) + '</code>';
+  const first = match.list[0];
+  if (!match.list.length) {
+    return asked
+      ? '⚠️ Водитель «' + esc_(asked) + '» не найден среди подключённых. Список — /водители'
+      : '⚠️ Водитель не найден в боте. ' + how + ' ' + cmd(sample.split(' ')[0]);
+  }
+  if (match.nameDiff) {
+    return '⚠️ Имя не совпадает' + (asked ? ' («' + esc_(asked) + '»)' : '') + ' — по фамилии подход' +
+      (match.list.length > 1 ? 'ят' : 'ит') + ': ' + names + '. Если это он, ' +
+      (asked ? 'напишите' : how.charAt(0).toLowerCase() + how.slice(1)) + ' ' + cmd(botFullName_(first));
+  }
+  return '⚠️ Подходят: ' + names + '. ' + how + ' ' + cmd(botFullName_(first));
+}
+
+
 // ===== ХРАНИЛИЩЕ: ВОДИТЕЛИ =====
 
 /** Все строки листа «Водители» (по одной на Telegram-аккаунт). row — номер строки в листе. */
@@ -447,6 +664,36 @@ function botSaveDriver_(ss, d) {
   } else {
     sh.appendRow(row);
     d.row = sh.getLastRow();
+  }
+}
+
+
+// ===== ХРАНИЛИЩЕ: СООБЩЕНИЯ =====
+// Лист «Сообщения» — связи сообщений с отчётами. Строка отчёта: chat_id = группа, message_id = Отчёт,
+// «Водитель» — кому ушла копия. Строка копии: chat_id = водитель, «Отчёт» — message_id отчёта в группе.
+
+/** Все строки листа «Сообщения». row — номер строки в листе. */
+function botMessages_(ss) {
+  const sh = botSheet_(ss, 'messages');
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return [];
+  return sh.getRange(2, 1, n, 7).getValues()
+    .map((r, i) => ({
+      row: i + 2, chat: String(r[0]).trim(), id: String(r[1]).trim(), route: String(r[2]).trim(),
+      report: String(r[3]).trim(), driver: String(r[4]).trim(), date: r[5], deleted: r[6],
+    }))
+    .filter(x => x.chat && x.id);
+}
+
+/** Записывает связь в её строку (или новой строкой). */
+function botSaveMessage_(ss, x) {
+  const sh = botSheet_(ss, 'messages');
+  const row = [x.chat, x.id, x.route, x.report, x.driver, x.date || new Date(), x.deleted || ''].map(botCell_);
+  if (x.row) {
+    sh.getRange(x.row, 1, 1, row.length).setValues([row]);
+  } else {
+    sh.appendRow(row);
+    x.row = sh.getLastRow();
   }
 }
 
@@ -578,6 +825,13 @@ function botSend_(chatId, html, markup, extra) {
   }, extra || {});
   if (markup && markup.inline_keyboard && markup.inline_keyboard.length) payload.reply_markup = markup;
   return botApi_('sendMessage', payload).message_id;
+}
+
+/** Сообщение ответом на replyTo (если его уже удалили — просто сообщение). */
+function botReply_(chatId, replyTo, html) {
+  return botSend_(chatId, html, null, {
+    reply_parameters: { message_id: Number(replyTo), allow_sending_without_reply: true },
+  });
 }
 
 /** Заменяет текст и кнопки сообщения бота. */

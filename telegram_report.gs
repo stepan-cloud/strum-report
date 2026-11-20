@@ -62,7 +62,23 @@ const TEST_ANSWER = {
 
 /** Срабатывает при каждой отправке формы (через триггер). */
 function onFormSubmitHandler(e) {
-  sendTelegram_(buildMessage_(dataFromResponse_(e.response)));
+  sendReport_(dataFromResponse_(e.response));
+}
+
+/**
+ * Отчёт в группу, затем копия водителю (бот, driver_bot.gs).
+ * Ошибка бота отчёту в группе не мешает: он к этому моменту уже отправлен.
+ */
+function sendReport_(d) {
+  const messageId = sendTelegram_(buildMessage_(d));
+  if (typeof botAfterReport_ === 'function') {
+    try {
+      botAfterReport_(d, messageId);
+    } catch (err) {
+      console.error('Бот: ' + (err.stack || err.message));
+    }
+  }
+  return messageId;
 }
 
 /** Запустить ОДИН раз вручную: создаёт триггер на отправку формы. */
@@ -74,25 +90,25 @@ function setupTrigger() {
   ScriptApp.newTrigger('onFormSubmitHandler').forForm(form).onFormSubmit().create();
 }
 
-/** Тест: отправляет сообщение по тестовому ответу TEST_ANSWER (время — текущее). */
+/** Тест: отправляет сообщение по тестовому ответу TEST_ANSWER (время — текущее) и копию водителю. */
 function testFakeAnswer() {
   const t = TEST_ANSWER;
   const points = [];
   for (let i = 1; i <= 30; i++) {
     points.push({ label: String(i), value: t.points[i] || '' });
   }
-  sendTelegram_(buildMessage_({
+  sendReport_({
     name: t.name, routeRaw: t.routeId, km: t.km, points: points,
     byn: t.byn, usd: t.usd, eur: t.eur, rub: t.rub,
     comment: t.comment, timestamp: new Date(),
-  }));
+  });
 }
 
-/** Тест: отправляет в Telegram последний настоящий ответ формы. */
+/** Тест: отправляет в Telegram последний настоящий ответ формы (и копию водителю). */
 function testLastResponse() {
   const responses = FormApp.getActiveForm().getResponses();
   if (!responses.length) throw new Error('В форме пока нет ответов');
-  sendTelegram_(buildMessage_(dataFromResponse_(responses[responses.length - 1])));
+  sendReport_(dataFromResponse_(responses[responses.length - 1]));
 }
 
 
@@ -124,8 +140,11 @@ function dataFromResponse_(response) {
   };
 }
 
-/** Собирает текст сообщения (HTML-разметка Telegram). Пустые строки не выводятся. */
-function buildMessage_(d) {
+/**
+ * Собирает текст сообщения (HTML-разметка Telegram). Пустые строки не выводятся.
+ * forDriver — копия для водителя: ФИО обычным жирным текстом, без ссылки на CRM.
+ */
+function buildMessage_(d, forDriver) {
   const clean = v => (v === null || v === undefined) ? '' : String(v).trim();
   const name = clean(d.name) || 'Без имени';
   const routeId = extractRouteId_(clean(d.routeRaw));
@@ -148,8 +167,8 @@ function buildMessage_(d) {
   const date = Utilities.formatDate(d.timestamp, TIMEZONE, 'dd.MM.yyyy');
   const time = Utilities.formatDate(d.timestamp, TIMEZONE, 'HH.mm.ss');
 
-  // --- Ссылка на CRM с дополнительными данными
-  const link = buildCrmLink_(routeId, {
+  // --- Ссылка на CRM с дополнительными данными (в копии водителю её нет)
+  const link = forDriver ? '' : buildCrmLink_(routeId, {
     fio: clean(d.name),
     pts: totalPoints || '',
     ns: notDelivered.join(','),
@@ -165,7 +184,7 @@ function buildMessage_(d) {
   const withT = arr => arr.map(n => n + 'т').join(', ');
 
   const lines = [
-    `<b><a href="${esc_(link)}">${esc_(name)}</a></b>`,
+    forDriver ? `<b>${esc_(name)}</b>` : `<b><a href="${esc_(link)}">${esc_(name)}</a></b>`,
     `Дата: ${date}.`,
     `Время: ${time}.`,
     `ID: <b><code>${esc_(routeId)}</code></b>`,
