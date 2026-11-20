@@ -249,6 +249,7 @@ function secret_(name) {
   return String(v).trim();
 }
 
+/** Отправляет сообщение в CHAT_ID. Возвращает message_id отправленного сообщения (нужен боту). */
 function sendTelegram_(html) {
   const url = `https://api.telegram.org/bot${secret_('TELEGRAM_TOKEN')}/sendMessage`;
   const res = UrlFetchApp.fetch(url, {
@@ -265,4 +266,5 @@ function sendTelegram_(html) {
   if (res.getResponseCode() !== 200) {
     throw new Error('Telegram ответил ошибкой: ' + res.getContentText());
   }
+  return JSON.parse(res.getContentText()).result.message_id;
 }

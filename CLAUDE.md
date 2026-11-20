@@ -22,6 +22,8 @@
   Только на страницах с параметрами отчёта качает
   `https://raw.githubusercontent.com/stepan-cloud/strum-report/main/crm_report_panel.js` и вставляет `<script>`.
   У CRM нет CSP, поэтому так можно. raw.githubusercontent.com кэширует до ~5 минут.
+- `driver_bot.gs` — бот для водителей (в работе, см. `BOT_PLAN.md`), тот же проект Apps Script. Имена — с bot/BOT_.
+  Отчёты теперь идут в группу (CHAT_ID — ID супергруппы `-100…`), бот в ней администратор.
 - `README.md` — краткое описание и установка.
 
 ## Git
