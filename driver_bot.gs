@@ -598,28 +598,52 @@ function botLinkKey_(route) {
 }
 
 /**
- * Веб-приложение: запрос из окна сверки. Тело — JSON { action: 'done', route, k, pay }.
- * Ответ — JSON { ok, driver, sum, already } или { ok: false, error }.
+ * Веб-приложение: запрос из окна сверки. Тело — JSON { action, route, k, pay }:
+ *   action 'done'  — написать водителю «маршрут завершён»;
+ *   action 'check' — пробный прогон: всё то же, но ничего не отправляет (для диагностики).
+ * Ответ — JSON { ok, driver, sum, already, check } или { ok: false, error }.
+ * Каждый запрос записывается строкой в лист «Журнал» (тип «окно сверки»): до какого шага дошёл и чем кончился.
  */
 function doPost(e) {
-  let res;
+  let res, q = {};
+  const trace = [];
+  const step = s => { trace.push(s); console.log('doPost: ' + s); };
   try {
-    const q = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-    if (q.action !== 'done') throw new Error('Неизвестный запрос');
-    res = botRouteDone_(q);
+    step('начало');
+    q = JSON.parse((e && e.postData && e.postData.contents) || '{}') || {};
+    if (q.action !== 'done' && q.action !== 'check') throw new Error('Неизвестный запрос');
+    res = botRouteDone_(q, step);
   } catch (err) {
-    console.error('Бот, веб-приложение: ' + (err.stack || err.message));
-    res = { ok: false, error: err.message };
+    console.error('Бот, веб-приложение: ' + (err && (err.stack || err.message) || err));
+    res = { ok: false, error: String(err && err.message || err) + ' (шаг: ' + trace[trace.length - 1] + ')' };
   }
+  botWebLog_(q, res, trace);
   return ContentService.createTextOutput(JSON.stringify(res)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/** Строка в «Журнал» о запросе окна сверки. Свою ошибку не бросает. */
+function botWebLog_(q, res, trace) {
+  try {
+    const what = (q.action || '?') + ' рейс ' + (q.route || '?') + (q.pay !== undefined ? ', итого ' + q.pay : '') +
+      ' → ' + (res && res.ok ? (res.check ? 'проверка ок' : res.already ? 'уже сообщено' : 'отправлено') +
+      (res.driver ? ': ' + res.driver : '') : 'ошибка: ' + (res && res.error)) + ' | шаги: ' + trace.join(' → ');
+    const sh = botSheet_(botBook_(), 'log');
+    const row = [Utilities.formatDate(new Date(), TIMEZONE, 'dd.MM.yyyy HH:mm:ss'), '', 'окно сверки', '', '', '', '', '',
+      what, JSON.stringify(res || {}).slice(0, 45000)];
+    sh.getRange(sh.getLastRow() + 1, 1, 1, row.length).setValues([row.map(botCell_)]);
+  } catch (e) {
+    console.error('Бот, журнал веб-приложения: ' + (e.stack || e.message));
+  }
 }
 
 /**
  * «Маршрут завершён» водителю. Водитель — тот, кому ушла копия последнего отчёта по этому рейсу.
  * То же «Итого» этому водителю уже отправляли — повторно не шлёт (already: true).
  */
-function botRouteDone_(q) {
+function botRouteDone_(q, step) {
+  step = step || function () {};
   const route = String(q.route || '').trim();
+  step('подпись');
   if (!route || String(q.k || '') !== botLinkKey_(route)) {
     return { ok: false, error: 'Ссылка не подходит к этому рейсу — откройте рейс по ссылке из отчёта в группе.' };
   }
@@ -627,11 +651,15 @@ function botRouteDone_(q) {
   if (q.pay === null || q.pay === undefined || q.pay === '' || !isFinite(pay)) {
     return { ok: false, error: 'Нет суммы «Итого водителю» — водителю не отправлено.' };
   }
+  step('блокировка');
   const lock = LockService.getScriptLock();
   const locked = lock.tryLock(20000);  // botPoll мог как раз писать в таблицу — подождём
   try {
+    step('таблица' + (locked ? '' : ' (без блокировки)'));
     const ss = botBook_();
+    step('CHAT_ID');
     const admin = botAdminChat_();
+    step('лист «Сообщения»');
     const msgs = botMessages_(ss);
     const reports = msgs.filter(x => x.chat === admin && x.id === x.report && x.route === route);
     const report = reports.filter(x => x.driver).pop();  // строки идут по времени — последний отчёт с водителем
@@ -640,6 +668,7 @@ function botRouteDone_(q) {
         ? 'Копия отчёта никому не отправлена — сначала ответьте на отчёт в группе: /водитель Фамилия.'
         : 'Отчёта по рейсу №' + route + ' нет в боте — водителю не отправлено.' };
     }
+    step('лист «Водители»');
     const driver = botDrivers_(ss).find(d => d.id === report.driver);
     if (!driver || driver.status !== BOT_ST.active) {
       return { ok: false, error: 'Водитель ' + (driver ? botFullName_(driver) + ' ' : '') +
@@ -654,10 +683,14 @@ function botRouteDone_(q) {
 
     // Ответом на копию этого отчёта (строки до этапа 4 — без «Что», это тоже копии).
     const copy = mine.filter(x => x.report === report.id && (x.kind === BOT_KIND.copy || !x.kind)).pop();
+    if (q.action === 'check') return { ok: true, check: true, driver: name, sum: sum, copy: copy ? copy.id : '' };
+    step('отправка водителю');
     const html = '🏁 Маршрут <b>№' + esc_(route) + '</b> завершён.\nИтого водителю: <b>' + esc_(sum) + '</b>';
     const sentId = copy ? botReply_(driver.id, copy.id, html) : botSend_(driver.id, html);
+    step('запись в «Сообщения»');
     botSaveMessage_(ss, { chat: driver.id, id: String(sentId), route: route, report: report.id,
       driver: driver.id, date: new Date(), deleted: '', kind: kind });
+    step('отметка в группе');
     try {
       botReply_(admin, report.id, '🏁 Водителю отправлено «маршрут завершён», итого водителю <b>' + esc_(sum) +
         '</b> — <b>' + esc_(name) + '</b>');
