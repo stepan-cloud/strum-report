@@ -5,6 +5,9 @@
  * Этап 4: «маршрут завершён» с итогом водителю — его присылает окно сверки в CRM через веб-приложение (doPost).
  * Этап 5: переписка: сообщения водителя уходят в группу (ответом на его последний отчёт), ответы из группы —
  *   водителю (ответом на его копию отчёта); /водитель с текстом шлёт водителю сообщение.
+ * Этап 6: очистка (раз в час, по BOT_NEXT_DUE): в личных чатах водителей удаляются ВСЕ сообщения старше ~47 ч
+ *   (Telegram даёт боту удалять в личке только моложе 48 ч), в админ-чате — ничего; строки «Сообщений»
+ *   и «Журнала» старше ~месяца стираются.
  * Файл лежит в том же проекте Apps Script, что и telegram_report.gs. Токен берётся оттуда же (secret_).
  * Все имена здесь начинаются с bot / BOT_, чтобы не совпасть с другими файлами проекта.
  *
@@ -22,7 +25,7 @@
 const BOT_P = {
   sheet: 'BOT_SHEET_ID',   // ID таблицы-хранилища
   offset: 'BOT_OFFSET',    // с какого события продолжать опрос getUpdates
-  due: 'BOT_NEXT_DUE',     // время (мс) ближайшего отложенного дела: удаление старых сообщений (этап 6)
+  due: 'BOT_NEXT_DUE',     // время (мс) ближайшей очистки: удаление старых сообщений и строк (этап 6)
   webApp: 'BOT_WEBAPP_URL', // адрес веб-приложения …/exec — его вписывает пользователь после развёртывания
   linkKey: 'BOT_LINK_KEY',  // секрет для подписи рейса в ссылке на CRM (создаётся сам, никому не нужен)
 };
@@ -126,7 +129,7 @@ function botPoll() {
       offset: offset, limit: 100, timeout: 0, allowed_updates: BOT_UPDATES,
     });
     const due = Number(props.getProperty(BOT_P.due) || 0);
-    const dueNow = due > 0 && due <= Date.now();
+    const dueNow = !due || due <= Date.now();  // отметки нет (бот только обновлён) — первая очистка сразу
     // Быстрый пустой запуск: нет событий и ничего не ждёт — таблицу даже не открываем.
     if (!updates.length && !dueNow) return;
 
@@ -148,9 +151,7 @@ function botPoll() {
       console.log('Новых событий: ' + rows.length + '\n' +
         rows.map(r => '  ' + r[2] + ' | чат ' + r[3] + ' ' + r[4] + ' | ' + r[5] + ' | ' + r[8]).join('\n'));
     }
-    if (dueNow) {
-      props.deleteProperty(BOT_P.due);  // отложенные дела (удаление старых сообщений) появятся на этапе 6
-    }
+    if (dueNow) botCleanup_(ss, props);  // очистка (этап 6) — сама ставит время следующей
   } finally {
     lock.releaseLock();
   }
@@ -180,7 +181,12 @@ function botOnMessage_(m, ss) {
     else if (m.reply_to_message && botHasContent_(m)) botOnAdminReply_(m, ss);  // ответ водителю — этап 5
     return;  // регистрация из админ-чата не принимается
   }
-  if (m.chat.type === 'private') botOnDriverMessage_(m, text, ss);
+  if (m.chat.type === 'private') {
+    // Каждое входящее пишем в «Сообщения» — очистка (этап 6) удалит его из чата через ~47 ч.
+    botSaveMessage_(ss, { chat: String(m.chat.id), id: String(m.message_id), route: '', report: '',
+      driver: String(m.from.id), date: m.date ? new Date(m.date * 1000) : new Date(), deleted: '', kind: BOT_KIND.in });
+    botOnDriverMessage_(m, text, ss);
+  }
 }
 
 
@@ -219,15 +225,15 @@ function botOnDriverMessage_(m, text, ss) {
 
   if (/^\/start(\s|$)/.test(text)) {
     if (me && me.status === BOT_ST.active) {
-      botSend_(id, 'Вы уже подключены: <b>' + esc_(botFullName_(me)) + '</b>.');
+      botTellDriver_(ss, id, 'Вы уже подключены: <b>' + esc_(botFullName_(me)) + '</b>.');
     } else if (me && me.status === BOT_ST.pending) {
-      botSend_(id, BOT_TXT.sent);
+      botTellDriver_(ss, id, BOT_TXT.sent);
     } else {
       if (!me) me = { id: id, last: '', first: '', username: uname };
       me.status = BOT_ST.askName;
       me.date = new Date();
       botSaveDriver_(ss, me);
-      botSend_(id, BOT_TXT.askName);
+      botTellDriver_(ss, id, BOT_TXT.askName);
     }
     return;
   }
@@ -235,7 +241,7 @@ function botOnDriverMessage_(m, text, ss) {
   if (me && me.status === BOT_ST.askName) {
     const name = botParseName_(text);
     if (!name) {
-      botSend_(id, BOT_TXT.badName);
+      botTellDriver_(ss, id, BOT_TXT.badName);
       return;
     }
     me.last = name.last;
@@ -243,25 +249,35 @@ function botOnDriverMessage_(m, text, ss) {
     me.status = BOT_ST.pending;
     me.date = new Date();
     botSaveDriver_(ss, me);
-    botSend_(id, BOT_TXT.sent);
+    botTellDriver_(ss, id, BOT_TXT.sent);
     botSendRequest_(me, drivers, m.from);
     return;
   }
 
-  if (me && me.status === BOT_ST.pending) botSend_(id, BOT_TXT.sent);
+  if (me && me.status === BOT_ST.pending) botTellDriver_(ss, id, BOT_TXT.sent);
   else if (me && me.status === BOT_ST.active) {
     if (/^\//.test(text)) {
-      botSend_(id, BOT_TXT.noCmd);
+      botTellDriver_(ss, id, BOT_TXT.noCmd);
     } else if (botHasContent_(m)) {
       // переписка с группой: сообщение уходит в группу ответом на его последний отчёт
       try {
         botPassToGroup_(m, me, ss);
       } catch (e) {
-        botSend_(id, '⚠️ Не удалось переслать в группу: ' + esc_(e.message));
+        botTellDriver_(ss, id, '⚠️ Не удалось переслать в группу: ' + esc_(e.message));
       }
     }
   }
-  else botSend_(id, BOT_TXT.start);
+  else botTellDriver_(ss, id, BOT_TXT.start);
+}
+
+/**
+ * Служебное сообщение водителю в личку (регистрация, подсказки) + запись в «Сообщения»,
+ * чтобы очистка (этап 6) удалила его из чата через ~47 ч, как и всё остальное.
+ */
+function botTellDriver_(ss, chatId, html) {
+  const id = botSend_(chatId, html);
+  botSaveMessage_(ss, { chat: String(chatId), id: String(id), route: '', report: '', driver: String(chatId),
+    date: new Date(), deleted: '', kind: BOT_KIND.sys });
 }
 
 /**
@@ -357,7 +373,7 @@ function botOnButton_(q, ss) {
     d.date = new Date();
     botSaveDriver_(ss, d);
     try {
-      botSend_(d.id, d.status === BOT_ST.active ? BOT_TXT.accepted : BOT_TXT.rejected);
+      botTellDriver_(ss, d.id, d.status === BOT_ST.active ? BOT_TXT.accepted : BOT_TXT.rejected);
     } catch (e) {
       note += ' (водителю не доставлено: ' + e.message + ')';
     }
@@ -723,8 +739,9 @@ function botPassToDriver_(ss, driver, m, repId, route, textOnly) {
 // Подпись k = HMAC(рейс, BOT_LINK_KEY) стоит в ссылке на CRM в отчёте: без ссылки из группы сообщение
 // водителю не отправить, а ключей в публичном коде окна сверки нет.
 
-// Что за сообщение — столбец «Что» листа «Сообщения».
-const BOT_KIND = { report: 'отчёт', copy: 'копия', done: 'итог', msg: 'сообщение' };
+// Что за сообщение — столбец «Что» листа «Сообщения». «входящее» — сообщение водителя боту,
+// «служебное» — ответ бота водителю вне отчёта (регистрация, подсказки); оба нужны очистке (этап 6).
+const BOT_KIND = { report: 'отчёт', copy: 'копия', done: 'итог', msg: 'сообщение', in: 'входящее', sys: 'служебное' };
 
 /**
  * Параметры для ссылки на CRM в отчёте: { k: подпись рейса, bot: путь веб-приложения «macros/s/…» }.
@@ -1006,7 +1023,9 @@ function botSaveDriver_(ss, d) {
 // ===== ХРАНИЛИЩЕ: СООБЩЕНИЯ =====
 // Лист «Сообщения» — связи сообщений с отчётами. Строка отчёта: chat_id = группа, message_id = Отчёт,
 // «Водитель» — кому ушла копия. Строка копии: chat_id = водитель, «Отчёт» — message_id отчёта в группе.
-// «Что» (BOT_KIND): отчёт / копия / «итог BYN 1 234» — сообщение «маршрут завершён». Строки до этапа 4 — пусто.
+// «Что» (BOT_KIND): отчёт / копия / «итог BYN 1 234» — сообщение «маршрут завершён» / сообщение (переписка) /
+// входящее (сообщение водителя боту) / служебное (ответ бота водителю вне отчёта). Строки до этапа 4 — пусто.
+// По этому же листу очистка (этап 6) находит сообщения водителей для удаления — колонка «Удалено».
 
 /** Все строки листа «Сообщения». row — номер строки в листе. */
 function botMessages_(ss) {
@@ -1116,6 +1135,112 @@ function botWhat_(m) {
 /** Текст, начинающийся с = + - @, таблица приняла бы за формулу — экранируем апострофом. */
 function botCell_(v) {
   return typeof v === 'string' && /^[=+\-@]/.test(v) ? "'" + v : v;
+}
+
+
+// ===== ОЧИСТКА (этап 6) =====
+// В личных чатах водителей удаляются ВСЕ сообщения старше BOT_CLEAN.msg — и бота, и водителя:
+// Telegram разрешает боту удалять сообщения в личке только моложе 48 ч, поэтому порог 46 ч
+// и запуск раз в час — даже с опозданием триггера успеваем до лимита. В админ-чате ничего
+// не удаляется — там копия всего. Строки «Сообщений» и «Журнала» старше BOT_CLEAN.rows стираются.
+// Что удалять — из листа «Сообщения»: туда пишется каждое сообщение водителя («входящее»)
+// и каждое сообщение бота водителю («копия», «итог», «сообщение», «служебное»).
+
+const BOT_CLEAN = {
+  msg: 46 * 3600 * 1000,        // сообщения в чатах водителей старше этого удаляем (~47 ч)
+  rows: 30 * 24 * 3600 * 1000,  // строки «Сообщений» и «Журнала» старше ~месяца стираем
+  every: 3600 * 1000,           // как часто чистить
+  retry: 10 * 60 * 1000,        // не успели за один запуск (или Telegram недоступен) — продолжить через
+  budget: 4 * 60 * 1000,        // столько времени на один запуск (лимит выполнения триггера — 6 мин)
+};
+
+/** Очистка по расписанию (зовёт botPoll, когда наступило BOT_NEXT_DUE). Сама ставит время следующей. */
+function botCleanup_(ss, props) {
+  const started = Date.now();
+  const admin = botAdminChat_();
+  const msgs = botMessages_(ss);
+  const age = x => started - new Date(x.date).getTime();
+
+  // 1. Сообщения в чатах водителей старше ~47 ч. Сначала самые старые — у них срок удаления
+  //    кончается раньше. Строки старше месяца пропускаем — они стираются вместе с листом ниже.
+  const old = msgs.filter(x => x.chat !== admin && !x.deleted && x.date &&
+    age(x) > BOT_CLEAN.msg && age(x) < BOT_CLEAN.rows);
+  old.sort((a, b) => age(b) - age(a));
+  let sent = 0, gone = 0, failed = 0, more = false, failsInRow = 0;
+  const marks = [];
+  for (let i = 0; i < old.length; i++) {
+    const x = old[i];
+    if (Date.now() - started > BOT_CLEAN.budget) { more = true; break; }
+    try {
+      botApi_('deleteMessage', { chat_id: x.chat, message_id: Number(x.id) });
+      marks.push(x.row);
+      sent++;
+      failsInRow = 0;
+    } catch (e) {
+      if (/not found|can't be deleted|to delete|message_id_invalid/i.test(e.message)) {
+        marks.push(x.row);  // уже удалено или срок вышел — больше не пытаемся
+        gone++;
+      } else {
+        failed++;
+        if (++failsInRow >= 5) { more = true; break; }  // Telegram недоступен — продолжим позже
+      }
+    }
+  }
+  if (marks.length) {  // отметки «Удалено» — одним столбцом, а не по ячейке на строку
+    const sh = botSheet_(ss, 'messages');
+    const col = sh.getRange(2, 7, sh.getLastRow() - 1, 1).getValues();
+    const now = new Date();
+    marks.forEach(r => { col[r - 2][0] = now; });
+    sh.getRange(2, 7, col.length, 1).setValues(col);
+  }
+
+  // 2. Строки «Сообщений» старше ~месяца — связи к этому времени уже не нужны.
+  const cut = started - BOT_CLEAN.rows;
+  const nMsg = botDeleteRows_(botSheet_(ss, 'messages'),
+    msgs.filter(x => x.date && new Date(x.date).getTime() < cut).map(x => x.row));
+
+  // 3. Журнал старше ~месяца (в столбце А — «дд.мм.гггг чч:мм:сс», таблица могла сама превратить в дату).
+  const logSh = botSheet_(ss, 'log');
+  const logRows = [];
+  if (logSh.getLastRow() > 1) {
+    logSh.getRange(2, 1, logSh.getLastRow() - 1, 1).getValues().forEach((r, i) => {
+      const t = botParseTime_(r[0]);
+      if (t && t.getTime() < cut) logRows.push(i + 2);
+    });
+  }
+  const nLog = botDeleteRows_(logSh, logRows);
+
+  // Итог — строкой в «Журнал», но только если было что чистить (иначе журнал рос бы от пустых отметок).
+  if (sent || gone || failed || nMsg || nLog) {
+    const what = 'очистка: сообщений удалено ' + sent + (gone ? ', уже не было ' + gone : '') +
+      (failed ? ', не удалось ' + failed : '') + (more ? ' (продолжу позже)' : '') +
+      ', строк «Сообщения» −' + nMsg + ', строк «Журнала» −' + nLog;
+    const sh = botSheet_(ss, 'log');
+    sh.getRange(sh.getLastRow() + 1, 1, 1, 10).setValues([[Utilities.formatDate(new Date(), TIMEZONE,
+      'dd.MM.yyyy HH:mm:ss'), '', 'очистка', '', '', '', '', '', what, ''].map(botCell_)]);
+  }
+  props.setProperty(BOT_P.due, String(started + (more ? BOT_CLEAN.retry : BOT_CLEAN.every)));
+}
+
+/** Удаляет строки листа по номерам (соседние — одним блоком, снизу вверх). Возвращает их число. */
+function botDeleteRows_(sh, rows) {
+  if (!rows.length) return 0;
+  const sorted = rows.slice().sort((a, b) => a - b);
+  const blocks = [];
+  sorted.forEach(r => {
+    const last = blocks[blocks.length - 1];
+    if (last && last.start + last.count === r) last.count++;
+    else blocks.push({ start: r, count: 1 });
+  });
+  for (let i = blocks.length - 1; i >= 0; i--) sh.deleteRows(blocks[i].start, blocks[i].count);
+  return sorted.length;
+}
+
+/** Время из столбца «Время» журнала: строка «дд.мм.гггг чч:мм:сс» или дата (таблица сама превращает). */
+function botParseTime_(v) {
+  if (v instanceof Date) return v;
+  const m = String(v || '').match(/^(\d{2})\.(\d{2})\.(\d{4})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  return m ? new Date(+m[3], +m[2] - 1, +m[1], +m[4], +m[5], +(m[6] || 0)) : null;
 }
 
 
