@@ -489,8 +489,8 @@ function botAfterReport_(d, reportId) {
 
 /**
  * Команда /водитель в группе: «/водитель Фамилия [Имя] [текст]».
- *   Есть текст после ФИО — текст пересылается этому водителю (ответом на его копию отчёта, если команда
- *   ответом на отчёт; иначе — с пометкой «💬 По маршруту №…», когда маршрут известен).
+ *   Есть текст после ФИО — текст пересылается этому водителю без пометки маршрута (ответом на его копию
+ *   отчёта, если команда ответом на отчёт).
  *   Только Фамилия [Имя] — прежнее поведение: ответом на отчёт выслать этому водителю копию
  *   и назначить его отчёту (текст копии берётся из самого отчёта, подходят и отчёты до этапа 3).
  */
@@ -530,7 +530,7 @@ function botOnDriverCmd_(m, arg, ss) {
   if (!rep) {
     reply('Чтобы отправить водителю сообщение, добавьте текст: <code>/водитель ' +
       esc_(botFullName_(driver)) + ' Текст сообщения</code>\n' +
-      'Копию отчёта выслать — ответом на сам отчёт (сообщение с ФИО и ID маршрута).');
+      'Копию отчёта выслать — ответом на сам отчёт (сообщение с ФИО и маршрутом).');
     return;
   }
   const msgs = botMessages_(ss);
@@ -597,8 +597,9 @@ function botLinkReport_(ss, msgs, reportId, route, driverId) {
 
 
 // ===== ПЕРЕПИСКА ВОДИТЕЛЬ ↔ ГРУППА (этап 5) =====
-// Сообщения водителя уходят в группу ответом на его последний отчёт (с шапкой «ФИО · маршрут №…»),
-// ответы из группы — водителю ответом на его копию отчёта. Каждое пересланное сообщение пишется
+// Сообщения водителя уходят в группу ответом на его последний отчёт (с шапкой «Маршрут №…»),
+// ответы из группы — водителю ответом на его копию отчёта (с той же шапкой; через /водитель — без неё).
+// Каждое пересланное сообщение пишется
 // в «Сообщения» (kind «сообщение») — поэтому ответы на пересланное находят своего адресата.
 
 /** В сообщении есть что пересылать: текст или медиа/документ/голосовое и т. п. */
@@ -623,8 +624,9 @@ function botMsgRow_(msgs, chatId, msgId) {
 /**
  * Сообщение водителя в личном чате — переслать в группу.
  * Ответ на копию отчёта → относится к тому отчёту; ответ на прочее или сообщение без «Ответить» →
- * к последней копии водителю; копий не было — просто сообщением. Подписывает водителя и маршрут,
- * медиа копирует под шапкой. Связь пишет в «Сообщения». Ошибка Telegram — бросает.
+ * к последней копии водителю; копий не было — просто сообщением. Шапка — «Маршрут №…»
+ * (маршрут неизвестен — ФИО водителя), медиа копирует под шапкой. Связь пишет в «Сообщения».
+ * Ошибка Telegram — бросает.
  */
 function botPassToGroup_(m, driver, ss) {
   const admin = botAdminChat_();
@@ -639,7 +641,7 @@ function botPassToGroup_(m, driver, ss) {
     if (copies.length) repId = copies[copies.length - 1].report;
   }
   const route = repId ? ((botMsgRow_(msgs, admin, repId) || {}).route || '') : '';
-  const head = '<b>' + esc_(botFullName_(driver)) + '</b>' + (route ? ' · маршрут №' + esc_(route) : '');
+  const head = route ? '<b>Маршрут №' + esc_(route) + '</b>' : '<b>' + esc_(botFullName_(driver)) + '</b>';
   const text = String(m.text || '').trim();
   if (text) {
     const sentId = repId ? botReply_(admin, repId, head + '\n' + esc_(text)) : botSend_(admin, head + '\n' + esc_(text));
@@ -659,7 +661,7 @@ function botPassToGroup_(m, driver, ss) {
  * Ответ в группе — переслать водителю.
  * Ответ на отчёт → его водителю; на сообщение бота из переписки (пересланное водителя, «🏁 итог» —
  * он сам ответ на отчёт) → тому водителю; на прочее — подсказка, как адресовать. Текст шлёт текстом,
- * медиа — копией; ответом на копию отчёта у водителя, копии нет — с пометкой «💬 По маршруту №…».
+ * медиа — копией; ответом на копию отчёта у водителя. С пометкой «Маршрут №…» (маршрут неизвестен — без неё).
  */
 function botOnAdminReply_(m, ss) {
   const admin = botAdminChat_();
@@ -690,24 +692,24 @@ function botOnAdminReply_(m, ss) {
 
 /**
  * Переслать сообщение группы (текст или медиа) водителю: ответом на его копию этого отчёта,
- * копии нет — с пометкой «💬 По маршруту №…» (маршрут неизвестен — просто сообщением).
+ * копии нет — просто сообщением. С пометкой «Маршрут №…» (маршрут неизвестен — без неё).
  * Связь пишет в «Сообщения», чтобы ответы водителя на эти сообщения находили его.
- * textOnly — переслать этот текст вместо текста сообщения (команда /водитель с текстом).
- * Ошибка Telegram — бросает.
+ * textOnly — переслать этот текст вместо текста сообщения (команда /водитель с текстом);
+ * тогда пометки нет вовсе. Ошибка Telegram — бросает.
  */
 function botPassToDriver_(ss, driver, m, repId, route, textOnly) {
   const msgs = botMessages_(ss);
   const copy = repId ? msgs.filter(x => x.chat === driver.id && x.report === repId &&
     (x.kind === BOT_KIND.copy || !x.kind)).pop() : null;
-  const label = route ? '💬 По маршруту №' + esc_(route) : '';
+  const label = textOnly === undefined && route ? '<b>Маршрут №' + esc_(route) + '</b>' : '';
   const text = textOnly !== undefined ? textOnly : String(m.text || '').trim();
   let sentId;
   if (text) {
-    const html = (copy || !label) ? esc_(text) : label + '\n' + esc_(text);
+    const html = label ? label + '\n' + esc_(text) : esc_(text);
     sentId = copy ? botReply_(driver.id, copy.id, html) : botSend_(driver.id, html);
   } else {
-    const quoteTo = copy ? copy.id : (label ? botSend_(driver.id, label) : '');
-    sentId = botCopyMessage_(driver.id, m, quoteTo);
+    const labelId = label ? (copy ? botReply_(driver.id, copy.id, label) : botSend_(driver.id, label)) : '';
+    sentId = botCopyMessage_(driver.id, m, labelId || (copy ? copy.id : ''));
   }
   botSaveMessage_(ss, { chat: driver.id, id: String(sentId), route: route || '', report: repId || '',
     driver: driver.id, date: new Date(), deleted: '', kind: BOT_KIND.msg });
@@ -874,18 +876,34 @@ function botMoney_(n) {
 /**
  * Подключённые водители, подходящие под ФИО «Фамилия Имя [Отчество]» (как в форме или в /водитель).
  * Без учёта регистра, ё = е; опечатки как в окне сверки: расстояние Левенштейна ≤1, для слов от 7 букв ≤2.
- * Точное совпадение фамилии важнее неточного. Если в ФИО есть имя, оно тоже проверяется (с опечатками;
- * «И.» — инициал). Возвращает { list, nameDiff }: nameDiff — по фамилии кто-то подходит, но имя другое
- * (тогда list — подошедшие по фамилии). Копия уходит, только если list ровно один и nameDiff = false.
+ * Точное совпадение фамилии важнее неточного.
+ * Однофамилец по фамилии один — имя не проверяется вовсе: водители пишут и инициалы («Фамилия И. О.»),
+ * и с опечатками, полное имя может не совпасть. Однофамильцев несколько — имя проверяется в два шага:
+ * сначала первая буква, и только у совпавших по ней — имя целиком (с опечатками; «И.» — инициал,
+ * для него хватает буквы). Возвращает { list, nameDiff }: nameDiff — по фамилии кто-то подходит,
+ * но имя другое (тогда list — подошедшие по фамилии).
+ * Копия уходит, только если list ровно один и nameDiff = false.
  */
 function botMatchDrivers_(drivers, fio) {
   const words = botWords_(fio);
   if (!words.length) return { list: [], nameDiff: false };
   const active = drivers.filter(d => d.status === BOT_ST.active);
   const byLast = botClosest_(active, d => d.last, words[0]);
-  if (!byLast.length || !words[1]) return { list: byLast, nameDiff: false };
-  const byFirst = botClosest_(byLast, d => d.first, words[1]);
+  if (byLast.length <= 1 || !words[1]) return { list: byLast, nameDiff: false };
+  const byFirst = botMatchFirst_(byLast, words[1]);
   return byFirst.length ? { list: byFirst, nameDiff: false } : { list: byLast, nameDiff: true };
+}
+
+/**
+ * Однофамильцы: сначала первая буква имени, и только у совпавших по ней — имя целиком.
+ * «И.» (инициал) — хватает первой буквы: полного имени в отчёте всё равно нет.
+ */
+function botMatchFirst_(list, word) {
+  const w = botClean_(word);
+  if (!w) return [];
+  const sameLetter = list.filter(d => botClean_(botNorm_(d.first)).charAt(0) === w.charAt(0));
+  const initial = /\./.test(word) && w.length <= 2;  // «И.» или «И.И.»
+  return initial ? sameLetter : botClosest_(sameLetter, d => d.first, word);
 }
 
 function botMatchOne_(match) { return match.list.length === 1 && !match.nameDiff; }

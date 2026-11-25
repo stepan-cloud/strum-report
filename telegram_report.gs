@@ -33,29 +33,12 @@ const ST_NOT_LOADED = 'Не загружен';
 
 
 // ===== ТЕСТОВЫЙ ОТВЕТ =====
-// Меняйте значения как нужно и запускайте функцию testFakeAnswer.
-// Пустая строка '' = поле не заполнено.
-const TEST_ANSWER = {
-  name: 'Иванов Иван Иванович',
-  routeId: '(4521) 13.11.2026',
-  km: '312',
-  // Точки: номер → 'Сдан' / 'Не сдан' / 'Не загружен'.
-  // Не указанные номера считаются незаполненными.
-  points: {
-    1: 'Сдан',
-    2: 'Сдан',
-    3: 'Не сдан',
-    4: 'Сдан',
-    5: 'Не загружен',
-    6: 'Не сдан',
-    7: 'Сдан',
-  },
-  byn: '1500',
-  usd: '',
-  eur: '200',
-  rub: '',
-  comment: 'Точка 3 была закрыта, перезвонить клиенту.',
-};
+// Свои значения для testFakeAnswer держите в отдельном файле проекта (например «test_report.gs») —
+// как токен в «Настройки.gs»: тогда обновление этого файла не собьёт их. Формат:
+//   const TEST_ANSWER = { name: 'Иванов Иван', routeId: '(4521) 13.11.2026', km: '312',
+//     points: { 1: 'Сдан', 3: 'Не сдан' }, byn: '1500', usd: '', eur: '', rub: '', comment: '' };
+// Пустая строка '' = поле не заполнено. Точки: номер → 'Сдан' / 'Не сдан' / 'Не загружен';
+// не указанные номера считаются незаполненными. Своего TEST_ANSWER нет — используется пример из testFakeSample_.
 
 
 // ===== ЗАПУСК =====
@@ -92,7 +75,7 @@ function setupTrigger() {
 
 /** Тест: отправляет сообщение по тестовому ответу TEST_ANSWER (время — текущее) и копию водителю. */
 function testFakeAnswer() {
-  const t = TEST_ANSWER;
+  const t = typeof TEST_ANSWER !== 'undefined' ? TEST_ANSWER : testFakeSample_();
   const points = [];
   for (let i = 1; i <= 30; i++) {
     points.push({ label: String(i), value: t.points[i] || '' });
@@ -102,6 +85,21 @@ function testFakeAnswer() {
     byn: t.byn, usd: t.usd, eur: t.eur, rub: t.rub,
     comment: t.comment, timestamp: new Date(),
   });
+}
+
+/** Пример тестового ответа — если в проекте нет своего TEST_ANSWER (см. шапку «ТЕСТОВЫЙ ОТВЕТ»). */
+function testFakeSample_() {
+  return {
+    name: 'Иванов Иван Иванович',
+    routeId: '(4521) 13.11.2026',
+    km: '312',
+    points: { 1: 'Сдан', 2: 'Сдан', 3: 'Не сдан', 4: 'Сдан', 5: 'Не загружен', 6: 'Не сдан', 7: 'Сдан' },
+    byn: '1500',
+    usd: '',
+    eur: '200',
+    rub: '',
+    comment: 'Точка 3 была закрыта, перезвонить клиенту.',
+  };
 }
 
 /** Тест: отправляет в Telegram последний настоящий ответ формы (и копию водителю). */
@@ -191,7 +189,7 @@ function buildMessage_(d, forDriver) {
     forDriver ? `<b>${esc_(name)}</b>` : `<b><a href="${esc_(link)}">${esc_(name)}</a></b>`,
     `Дата: ${date}.`,
     `Время: ${time}.`,
-    `ID: <b><code>${esc_(routeId)}</code></b>`,
+    `Маршрут: <b><code>${esc_(routeId)}</code></b>`,
     SEPARATOR,
   ];
   if (km) lines.push(`КМ: <b><code>${esc_(km)}</code></b>`);

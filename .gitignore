@@ -1,3 +1,5 @@
 # Файл с токеном бота живёт только в Apps Script — сюда его не класть
 config*.gs
 Настройки*.gs
+# Мои настройки тестового отчёта (testFakeAnswer) — тоже только в Apps Script
+test_report*.gs
