@@ -957,14 +957,18 @@
     }
     if (done) notifyDriver(`Статус рейса: ${st.text} → Завершен.`);
   } }, finLabel, finStatus);
-  // 📨 — видна у завершённого рейса: ещё раз попросить бота написать водителю (бот не повторит то же «Итого»)
+  // 📨 — видна у завершённого рейса: попросить бота написать водителю «маршрут завершён».
+  // Уже уходило → кнопка краснеет, а повторное нажатие по красной шлёт сообщение ещё раз (force боту).
   let sendBusy = false;
+  let sendAgain = false;
   const btnSend = el('button', { class: 'srp-icon', onclick: () => notifyDriver('') }, '📨');
   btnSend.style.display = 'none';
 
   /**
    * Бот пишет водителю «Маршрут №… завершён. Итого водителю: BYN …» (ответом на его копию отчёта).
    * Запрос — к веб-приложению Apps Script (driver_bot.gs, doPost); итог — подсказкой внизу окна.
+   * Бот не повторяет то же «Итого»: тогда кнопка становится красной, а следующее нажатие шлёт force: true
+   * — и бот пишет водителю ещё раз.
    */
   async function notifyDriver(prefix) {
     const say = (msg, ms) => showToast((prefix ? prefix + ' ' : '') + msg, ms || 7000);
@@ -978,11 +982,20 @@
     say('Пишу водителю…', 20000);
     try {
       // text/plain — простой запрос, браузер отправляет его на другой сайт без предварительной проверки
-      const res = await fetch(BOT_URL, { method: 'POST', body: JSON.stringify({ action: 'done', route, k: BOT_KEY, pay }) });
+      const body = { action: 'done', route, k: BOT_KEY, pay };
+      if (sendAgain) body.force = true;  // красная кнопка — отправить ещё раз, несмотря на «уже сообщено»
+      const res = await fetch(BOT_URL, { method: 'POST', body: JSON.stringify(body) });
       const d = await res.json();
       if (!d.ok) say(`⚠️ ${d.error || 'Бот не ответил'}`, 10000);
-      else if (d.already) say(`ℹ️ Водителю (${d.driver}) уже сообщено: итого ${d.sum}`);
-      else say(`📨 Водителю (${d.driver}) отправлено: маршрут завершён, итого ${d.sum}`);
+      else if (d.already) {
+        sendAgain = true;
+        paintBtn(btnSend, 'bad', 'Сообщение водителю уже отправлялось. Нажмите ещё раз — отправить повторно');
+        say(`ℹ️ Водителю (${d.driver}) уже сообщено: итого ${d.sum}`);
+      } else {
+        sendAgain = false;
+        paintBtn(btnSend, '', 'Написать водителю «маршрут завершён» с «Итого водителю» из CRM (то же итого повторно не уйдёт)');
+        say(`📨 Водителю (${d.driver}) отправлено: маршрут завершён, итого ${d.sum}`);
+      }
     } catch (e) {
       say(`⚠️ Бот не ответил (${e.message}). Повторить — 📨`, 10000);
     } finally {
@@ -1007,9 +1020,11 @@
     if (finBusy) return;
     const st = safe(() => CRM.getRouteStatus());
     btnSend.style.display = st && st.value === 'done' ? '' : 'none';
-    btnSend.title = BOT_URL
-      ? 'Написать водителю «маршрут завершён» с «Итого водителю» из CRM (то же итого повторно не уйдёт)'
-      : 'Ссылка из старого отчёта — водителю отсюда не написать';
+    btnSend.title = !BOT_URL
+      ? 'Ссылка из старого отчёта — водителю отсюда не написать'
+      : sendAgain
+        ? 'Сообщение водителю уже отправлялось. Нажмите ещё раз — отправить повторно'
+        : 'Написать водителю «маршрут завершён» с «Итого водителю» из CRM (то же итого повторно не уйдёт)';
     btnFin.disabled = !st;
     finLabel.textContent = st && st.value === 'done' ? 'Не завершать' : 'Завершить';
     finStatus.textContent = st ? st.text : 'статус ?';

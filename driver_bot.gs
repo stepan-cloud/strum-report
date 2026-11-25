@@ -716,7 +716,8 @@ function botPassToDriver_(ss, driver, m, repId, route, textOnly) {
 
 // ===== МАРШРУТ ЗАВЕРШЁН =====
 // В окне сверки в CRM нажали «Завершить» → окно шлёт сюда (веб-приложение, doPost) номер рейса, подпись
-// из ссылки и «Итого водителю» из CRM → бот пишет водителю ответом на его копию отчёта, в группу — отметку.
+// из ссылки и «Итого водителю» из CRM → бот пишет водителю ответом на его копию отчёта,
+// а в группе ставит на отчёт реакцию 💯 (значит: завершён, водителю отправлено).
 // Подпись k = HMAC(рейс, BOT_LINK_KEY) стоит в ссылке на CRM в отчёте: без ссылки из группы сообщение
 // водителю не отправить, а ключей в публичном коде окна сверки нет.
 
@@ -753,9 +754,10 @@ function botLinkKey_(route) {
 }
 
 /**
- * Веб-приложение: запрос из окна сверки. Тело — JSON { action, route, k, pay }:
+ * Веб-приложение: запрос из окна сверки. Тело — JSON { action, route, k, pay, force }:
  *   action 'done'  — написать водителю «маршрут завершён»;
- *   action 'check' — пробный прогон: всё то же, но ничего не отправляет (для диагностики).
+ *   action 'check' — пробный прогон: всё то же, но ничего не отправляет (для диагностики);
+ *   force          — только с 'done': отправить, даже если такое же «Итого» уже уходило.
  * Ответ — JSON { ok, driver, sum, already, check } или { ok: false, error }.
  * Каждый запрос записывается строкой в лист «Журнал» (тип «окно сверки»): до какого шага дошёл и чем кончился.
  */
@@ -793,7 +795,8 @@ function botWebLog_(q, res, trace) {
 
 /**
  * «Маршрут завершён» водителю. Водитель — тот, кому ушла копия последнего отчёта по этому рейсу.
- * То же «Итого» этому водителю уже отправляли — повторно не шлёт (already: true).
+ * То же «Итого» этому водителю уже отправляли — повторно не шлёт (already: true), но q.force —
+ * из окна сверки по красной кнопке 📨 — отправляет ещё раз.
  */
 function botRouteDone_(q, step) {
   step = step || function () {};
@@ -834,7 +837,7 @@ function botRouteDone_(q, step) {
     const kind = BOT_KIND.done + ' ' + sum;
     const mine = msgs.filter(x => x.chat === driver.id && x.route === route && !x.deleted);
     const last = mine.filter(x => x.kind.indexOf(BOT_KIND.done) === 0).pop();
-    if (last && last.kind === kind) return { ok: true, already: true, driver: name, sum: sum };
+    if (last && last.kind === kind && !q.force) return { ok: true, already: true, driver: name, sum: sum };
 
     // Ответом на копию этого отчёта (строки до этапа 4 — без «Что», это тоже копии).
     const copy = mine.filter(x => x.report === report.id && (x.kind === BOT_KIND.copy || !x.kind)).pop();
@@ -847,8 +850,10 @@ function botRouteDone_(q, step) {
       driver: driver.id, date: new Date(), deleted: '', kind: kind });
     step('отметка в группе');
     try {
-      botReply_(admin, report.id, '🏁 Водителю отправлено «маршрут завершён», итого водителю <b>' + esc_(sum) +
-        '</b> — <b>' + esc_(name) + '</b>');
+      botApi_('setMessageReaction', {
+        chat_id: admin, message_id: Number(report.id),
+        reaction: [{ type: 'emoji', emoji: '💯' }],
+      });
     } catch (e) { /* водителю уже ушло — отметка в группе не главное */ }
     return { ok: true, driver: name, sum: sum };
   } finally {
