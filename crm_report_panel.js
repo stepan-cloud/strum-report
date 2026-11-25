@@ -133,8 +133,6 @@
      */
     async setRouteStatus(value) {
       if (typeof window.rtStep !== 'function') throw new Error('Не нашёл в CRM функцию смены статуса рейса — ничего не менял.');
-      if (String(window._routeId) !== String(ROUTE_ID))
-        throw new Error(`Открыт другой рейс (${window._routeId}), а отчёт — по рейсу ${ROUTE_ID}. Ничего не менял.`);
       await window.rtStep(window._routeId, value);   // ошибки сервера CRM показывает сама и не бросает
       return waitFor(() => { const st = CRM.getRouteStatus(); return st && st.value === value ? st : null; },
         6000, 'Статус рейса не поменялся — проверьте поле «Статус».');
@@ -142,10 +140,9 @@
 
     /**
      * «Итого водителю» (BYN) — число с сервера CRM: window._route.pay.to_pay; на экране — div.rt-itog «BYN 1 234».
-     * null — если на странице его нет или открыт другой рейс.
+     * null — если на странице его нет.
      */
     getDriverPay() {
-      if (String(window._routeId) !== String(ROUTE_ID)) return null;
       const p = window._route && window._route.pay;
       if (p && p.to_pay !== null && p.to_pay !== undefined && p.to_pay !== '' && isFinite(+p.to_pay)) return +p.to_pay;
       const box = document.querySelector('.rt-itog');
@@ -319,6 +316,11 @@
     return m ? decodeURIComponent(m[1]) : null;
   };
   const ROUTE_ID = routeIdFromHash();
+  // После авторизации в CRM фрагмент #route/… из адреса теряется (браузер не отправляет его на сервер,
+  // редирект его сбрасывает) — тогда номер рейса берём со страницы самой CRM (window._routeId).
+  const crmRouteId = () => (window._routeId === null || window._routeId === undefined || window._routeId === '')
+    ? '' : String(window._routeId);
+  const routeId = () => ROUTE_ID || crmRouteId();
 
   const nums = s => (s || '').split(',').map(x => parseInt(x, 10)).filter(n => !isNaN(n)).sort((a, b) => a - b);
   const num = v => {
@@ -921,7 +923,7 @@
   const btnKm = el('button', { title: 'Записать километраж из отчёта', onclick: () => CRM.applyKm(num(report.km)) }, 'КМ');
   const btnEdit = el('button', { class: 'srp-icon', title: 'Редактировать значения отчёта', onclick: toggleEdit }, '✎');
   const btnHide = el('button', { class: 'srp-icon', title: 'Скрыть / раскрыть', onclick: toggleCollapse }, '▾');
-  const title = el('div', { class: 'srp-title' }, `Отчёт · ${ROUTE_ID || '?'}`);
+  const title = el('div', { class: 'srp-title' }, `Отчёт · ${routeId() || '?'}`);
   // «ОПТ» — красная плашка, если в товарах рейса есть «@табл опт»; клик — к следующей такой строке
   let optIdx = -1;
   const optBadge = el('button', { class: 'srp-bad srp-opt', onclick: () => {
@@ -968,13 +970,15 @@
     const say = (msg, ms) => showToast((prefix ? prefix + ' ' : '') + msg, ms || 7000);
     if (!BOT_URL) return say('Водителю не сообщено: ссылка из старого отчёта (нет данных бота).');
     if (sendBusy) return;
+    const route = routeId();
+    if (!route) return say('Водителю не сообщено: не определился номер рейса. Откройте рейс из ссылки отчёта, затем нажмите 📨.');
     const pay = safe(() => CRM.getDriverPay());
     if (pay === null) return say('Водителю не сообщено: не нашёл «Итого водителю» на странице. Повторить — 📨');
     sendBusy = true; btnSend.disabled = true; btnSend.textContent = '⏳';
     say('Пишу водителю…', 20000);
     try {
       // text/plain — простой запрос, браузер отправляет его на другой сайт без предварительной проверки
-      const res = await fetch(BOT_URL, { method: 'POST', body: JSON.stringify({ action: 'done', route: ROUTE_ID, k: BOT_KEY, pay }) });
+      const res = await fetch(BOT_URL, { method: 'POST', body: JSON.stringify({ action: 'done', route, k: BOT_KEY, pay }) });
       const d = await res.json();
       if (!d.ok) say(`⚠️ ${d.error || 'Бот не ответил'}`, 10000);
       else if (d.already) say(`ℹ️ Водителю (${d.driver}) уже сообщено: итого ${d.sum}`);
@@ -1065,6 +1069,7 @@
     optBadge.title = `В товарах есть «@табл опт»: ${optRows.map(r => r.num + 'т').join(', ')}. Нажмите — показать`;
 
     paintFin();
+    title.textContent = `Отчёт · ${routeId() || '?'}`;
 
     // Цвет кнопок: зелёная — в CRM уже как в отчёте, красная — отличается
     const repKm = num(report.km);
@@ -1177,9 +1182,12 @@
     document.addEventListener('mouseup', () => { moving = false; });
   })();
 
-  // Окно видно только на странице того маршрута, к которому относится отчёт
+  // Окно видно на странице рейса отчёта. Номер рейса из ссылки; если фрагмент #route/… потерялся
+  // (после авторизации в CRM редирект его сбрасывает) — номер берём со страницы CRM и окно не прячем:
+  // сравнивать в этом случае нечего, а блокировать работу из-за потерянного номера незачем.
   function updateVisibility() {
-    panel.style.display = routeIdFromHash() === ROUTE_ID ? '' : 'none';
+    const cur = routeIdFromHash() || crmRouteId();
+    panel.style.display = !ROUTE_ID || cur === ROUTE_ID ? '' : 'none';
   }
   window.addEventListener('hashchange', updateVisibility);
   updateVisibility();
