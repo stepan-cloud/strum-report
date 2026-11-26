@@ -941,6 +941,10 @@
   let finBusy = false;
   const btnFin = el('button', { class: 'srp-fin', onclick: async () => {
     if (finBusy) return;
+    // Если печатали в поле (например, в комментарии) — снять фокус и сохранить правки,
+    // иначе render() ниже пересоздаст поля и несохранённый текст пропадёт
+    if (document.activeElement && panel.contains(document.activeElement)) document.activeElement.blur();
+    commitEdits();
     const st = safe(() => CRM.getRouteStatus());
     if (!st) return showToast('Не нашёл статус рейса на странице');
     const to = st.value === 'done' ? 'not_done' : 'done';
@@ -1038,11 +1042,15 @@
     return { total: num(report.pts) || 0, ns: nums(report.ns), nl: nums(report.nl) };
   }
 
+  // Перенести значения из полей правки в report и сохранить (режим правки не выключает)
+  function commitEdits() {
+    if (!editing) return;
+    body.querySelectorAll('[data-key]').forEach(inp => { report[inp.dataset.key] = inp.value.trim(); });
+    saveReport();
+  }
+
   function toggleEdit() {
-    if (editing) {
-      body.querySelectorAll('[data-key]').forEach(inp => { report[inp.dataset.key] = inp.value.trim(); });
-      saveReport();
-    }
+    if (editing) commitEdits();
     editing = !editing;
     btnEdit.classList.toggle('srp-active', editing);
     btnEdit.textContent = editing ? '💾' : '✎';
