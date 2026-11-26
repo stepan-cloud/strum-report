@@ -167,8 +167,8 @@ function buildMessage_(d, forDriver) {
 
   // --- Ссылка на CRM с дополнительными данными (в копии водителю её нет).
   // k и bot — чтобы окно сверки могло попросить бота написать водителю «маршрут завершён» (driver_bot.gs).
-  const bot = forDriver || typeof botLinkParams_ !== 'function' ? {} : botLinkParams_(routeId);
-  const link = forDriver ? '' : buildCrmLink_(routeId, {
+  const bot = forDriver || !routeId || typeof botLinkParams_ !== 'function' ? {} : botLinkParams_(routeId);
+  const link = forDriver || !routeId ? '' : buildCrmLink_(routeId, {
     fio: clean(d.name),
     pts: totalPoints || '',
     ns: notDelivered.join(','),
@@ -186,12 +186,13 @@ function buildMessage_(d, forDriver) {
   const withT = arr => arr.map(n => n + 'т').join(', ');
 
   const lines = [
-    forDriver ? `<b>${esc_(name)}</b>` : `<b><a href="${esc_(link)}">${esc_(name)}</a></b>`,
+    forDriver || !routeId ? `<b>${esc_(name)}</b>` : `<b><a href="${esc_(link)}">${esc_(name)}</a></b>`,
     `Дата: ${date}.`,
     `Время: ${time}.`,
-    `Маршрут: <b><code>${esc_(routeId)}</code></b>`,
-    SEPARATOR,
   ];
+  if (routeId) lines.push(`Маршрут: <b><code>${esc_(routeId)}</code></b>`);
+  if (clean(d.type)) lines.push(`Тип: <b>${esc_(clean(d.type))}</b>`);  // есть только у отчётов из формы бота
+  lines.push(SEPARATOR);
   if (km) lines.push(`КМ: <b><code>${esc_(km)}</code></b>`);
   lines.push(`📍 Всего точек: <b>${totalPoints}</b>`);
   if (notDelivered.length) lines.push(`⚠️ Не сдан: <b>${esc_(withT(notDelivered))}</b>`);

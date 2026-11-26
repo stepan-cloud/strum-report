@@ -208,11 +208,12 @@ const BOT_TXT = {
   badName: 'Напишите фамилию и имя через пробел, например: Иванов Иван',
   sent: 'Заявка отправлена, ждите подтверждения.',
   help: 'Инструкция чата:\n' +
-    '1. Сюда будут приходить копии ваших отчётов.\n' +
-    '2. Сюда будут приходить оповещения о завершении маршрутов.\n' +
-    '3. В этом чате можно вести переписку с принимающим отчёты.\n' +
-    '4. Все сообщения доходят до второй стороны с задержкой до 1 минуты — будьте терпеливы.\n' +
-    '5. Напишите /start, если захотите снова увидеть эту инструкцию.',
+    '1. Через этот чат можно создать новый отчёт.\n' +
+    '2. Сюда будут приходить копии ваших отчётов.\n' +
+    '3. Сюда будут приходить оповещения о завершении маршрутов.\n' +
+    '4. В этом чате можно вести переписку с принимающим отчёты.\n' +
+    '5. Все сообщения доходят до второй стороны с задержкой до 1 минуты — будьте терпеливы.\n' +
+    '6. Напишите /start, если захотите снова увидеть эту инструкцию.',
   rejected: '❌ Заявка отклонена.',
   start: 'Чтобы подключиться к боту, нажмите /start',
   noCmd: 'Такой команды я не знаю. Просто напишите сообщение — я передам его в группу.',
@@ -232,6 +233,13 @@ function botOnDriverMessage_(m, text, ss) {
   if (/^\/start(\s|$)/.test(text)) {
     if (me && me.status === BOT_ST.active) {
       botTellDriver_(ss, id, 'Вы уже подключены: <b>' + esc_(botFullName_(me)) + '</b>.\n\n' + BOT_TXT.help);
+      if (typeof botReportKeyboard_ === 'function') {
+        try {
+          botSend_(id, 'Заполнить и отправить отчёт можно кнопкой ниже 👇', botReportKeyboard_());
+        } catch (e) {
+          console.error('Бот: кнопка «Создать отчёт» не отправлена: ' + (e.stack || e.message));
+        }
+      }
     } else if (me && me.status === BOT_ST.pending) {
       botTellDriver_(ss, id, BOT_TXT.sent);
     } else {
@@ -382,6 +390,13 @@ function botOnButton_(q, ss) {
       botTellDriver_(ss, d.id, d.status === BOT_ST.active ? '✅ Вы подключены!\n\n' + BOT_TXT.help : BOT_TXT.rejected);
     } catch (e) {
       note += ' (водителю не доставлено: ' + e.message + ')';
+    }
+    if (d.status === BOT_ST.active && typeof botReportKeyboard_ === 'function') {
+      try {
+        botSend_(d.id, 'Заполнить и отправить отчёт можно кнопкой ниже 👇', botReportKeyboard_());
+      } catch (e2) {
+        note += ' (кнопка отчёта не доставлена: ' + e2.message + ')';
+      }
     }
     answer(note);
     botCloseRequest_(q, note + (by ? ' — ' + by : ''));
@@ -795,8 +810,12 @@ function doPost(e) {
   try {
     step('начало');
     q = JSON.parse((e && e.postData && e.postData.contents) || '{}') || {};
-    if (q.action !== 'done' && q.action !== 'check') throw new Error('Неизвестный запрос');
-    res = botRouteDone_(q, step);
+    if (q.action === 'report') {
+      res = botReportFromWeb_(q, step);  // отчёт из формы WebApp (этап 7, report_form.gs)
+    } else {
+      if (q.action !== 'done' && q.action !== 'check') throw new Error('Неизвестный запрос');
+      res = botRouteDone_(q, step);
+    }
   } catch (err) {
     console.error('Бот, веб-приложение: ' + (err && (err.stack || err.message) || err));
     res = { ok: false, error: String(err && err.message || err) + ' (шаг: ' + trace[trace.length - 1] + ')' };
@@ -1273,12 +1292,14 @@ function botSheet_(ss, key) {
 /** ID админ-чата (группы) — CHAT_ID из файла настроек. */
 function botAdminChat_() { return String(secret_('CHAT_ID')); }
 
-/** Сообщение в чат (HTML). markup — кнопки { inline_keyboard: [...] }. Возвращает message_id. */
+/** Сообщение в чат (HTML). markup — кнопки: { inline_keyboard: [...] } или Reply-клавиатура
+ * { keyboard: [[...]], resize_keyboard: true } (кнопка «Создать отчёт», report_form.gs). Возвращает message_id. */
 function botSend_(chatId, html, markup, extra) {
   const payload = Object.assign({
     chat_id: chatId, text: html, parse_mode: 'HTML', link_preview_options: { is_disabled: true },
   }, extra || {});
-  if (markup && markup.inline_keyboard && markup.inline_keyboard.length) payload.reply_markup = markup;
+  if (markup && ((markup.inline_keyboard && markup.inline_keyboard.length) ||
+      (markup.keyboard && markup.keyboard.length))) payload.reply_markup = markup;
   return botApi_('sendMessage', payload).message_id;
 }
 

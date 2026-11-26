@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>window.WEB_APP_URL = "<?= webAppUrl ?>";</script>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1f2937);
+    --hint: var(--tg-theme-hint-color, #6b7280);
+    --field: var(--tg-theme-secondary-bg-color, #f3f5f7);
+    --accent: var(--tg-theme-button-color, #2563eb);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --line: #d5dae0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 14px; }
+  .field { display: block; margin: 0 0 14px; font-weight: 600; }
+  .field legend { font-weight: 600; padding: 0 4px; }
+  fieldset.field { border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  .field > input, .field textarea {
+    display: block; width: 100%; margin-top: 5px;
+    font: inherit; font-weight: 400; color: var(--text);
+    background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px;
+  }
+  .field input:focus, .field textarea:focus, .field select:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .field input:disabled { opacity: .5; }
+
+  /* Тип рейса — переключатель */
+  .seg { display: flex; gap: 6px; margin-top: 5px; }
+  .seg label { flex: 1; }
+  .seg input { display: none; }
+  .seg span {
+    display: block; text-align: center; padding: 9px 4px; border-radius: 8px;
+    background: var(--field); border: 1px solid var(--line); font-weight: 400; cursor: pointer;
+  }
+  .seg input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+
+  .kmrow { display: flex; gap: 8px; margin-top: 5px; align-items: center; }
+  .kmrow input { flex: 1; min-width: 0; font: inherit; padding: 9px 10px; color: var(--text);
+    background: var(--field); border: 1px solid var(--line); border-radius: 8px; }
+  .chk { display: flex; align-items: center; gap: 6px; font-weight: 400; white-space: nowrap; cursor: pointer; }
+  .chk input { width: 18px; height: 18px; }
+
+  /* Точки и кассы */
+  .ptrow, .currow { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
+  .ptnum { min-width: 26px; text-align: right; color: var(--hint); font-weight: 600; }
+  .ptrow select, .currow select {
+    font: inherit; color: var(--text); background: var(--field);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 6px;
+  }
+  .ptrow input, .currow input {
+    flex: 1; min-width: 0; font: inherit; font-weight: 400; color: var(--text);
+    background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px;
+  }
+  .rowbtns { display: flex; gap: 8px; margin-top: 8px; }
+  .btn {
+    flex: 1; font: inherit; font-weight: 600; padding: 12px; border-radius: 10px;
+    border: none; cursor: pointer; color: #fff;
+  }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn.green { background: #16a34a; }
+  .btn.red { background: #dc2626; }
+  .btn.submit { width: 100%; background: var(--accent); color: var(--accent-text); font-size: 16px; margin-top: 4px; }
+  .msg { margin-top: 10px; text-align: center; color: var(--hint); }
+  .msg.bad { color: #dc2626; font-weight: 600; }
+  .req { color: #dc2626; }
+</style>
+</head>
+<body>
+<form id="report" novalidate>
+  <h1>Отчёт по маршруту</h1>
+
+  <div class="field">Тип рейса <span class="req">*</span>
+    <div class="seg" id="typeSeg">
+      <label><input type="radio" name="type" value="Розница" checked><span>Розница</span></label>
+      <label><input type="radio" name="type" value="ОПТ"><span>ОПТ</span></label>
+      <label><input type="radio" name="type" value="Розница и ОПТ"><span>Розница и ОПТ</span></label>
+    </div>
+  </div>
+
+  <div id="sec-route">
+    <label class="field">Номер маршрута <span class="req">*</span>
+      <input type="text" id="route" inputmode="numeric" placeholder="Только цифры, например 4521">
+    </label>
+
+    <div class="field">Фактическая длина маршрута, км <span class="req">*</span>
+      <div class="kmrow">
+        <input type="text" id="km" inputmode="numeric" placeholder="Только цифры">
+        <label class="chk"><input type="checkbox" id="tracker"><span>По трекеру</span></label>
+      </div>
+    </div>
+  </div>
+
+  <fieldset class="field" id="sec-points">
+    <legend>Точки <span class="req">*</span></legend>
+    <div id="points"></div>
+    <div class="rowbtns">
+      <button type="button" class="btn green" id="addPoint">Добавить точку</button>
+      <button type="button" class="btn red" id="delPoint">Убрать точку</button>
+    </div>
+  </fieldset>
+
+  <fieldset class="field" id="sec-cash-retail">
+    <legend>Касса розница</legend>
+    <div id="cashR"></div>
+    <div class="rowbtns">
+      <button type="button" class="btn green" id="addCurR">Добавить валюту</button>
+      <button type="button" class="btn red" id="delCurR">Убрать валюту</button>
+    </div>
+  </fieldset>
+
+  <fieldset class="field" id="sec-cash-opt">
+    <legend>Касса ОПТ</legend>
+    <div id="cashO"></div>
+    <div class="rowbtns">
+      <button type="button" class="btn green" id="addCurO">Добавить валюту</button>
+      <button type="button" class="btn red" id="delCurO">Убрать валюту</button>
+    </div>
+  </fieldset>
+
+  <label class="field">Комментарий к маршруту
+    <textarea id="comment" rows="3" placeholder="Необязательно"></textarea>
+  </label>
+
+  <button type="submit" class="btn submit" id="send">Отправить отчёт</button>
+  <div id="msg" class="msg"></div>
+</form>
+
+<script>
+(function () {
+  'use strict';
+
+  var STATUSES = ['Сдан', 'Не сдан', 'Не загружен'];
+  var CUR = ['BYN', 'USD', 'EUR', 'RUB'];
+  var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  function el(tag, attrs) {
+    var e = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) { e.setAttribute(k, attrs[k]); });
+    for (var i = 2; i < arguments.length; i++) e.append(arguments[i]);
+    return e;
+  }
+
+  // ===== Тип рейса: какие разделы показывать =====
+  // Розница — маршрут/км, точки, касса розница; ОПТ — касса ОПТ; Розница и ОПТ — всё.
+  var SHOW = {
+    'Розница': ['sec-route', 'sec-points', 'sec-cash-retail'],
+    'ОПТ': ['sec-cash-opt'],
+    'Розница и ОПТ': ['sec-route', 'sec-points', 'sec-cash-retail', 'sec-cash-opt'],
+  };
+  function type() {
+    var r = document.querySelector('input[name=type]:checked');
+    return r ? r.value : 'Розница';
+  }
+  function applyType() {
+    var show = SHOW[type()];
+    ['sec-route', 'sec-points', 'sec-cash-retail', 'sec-cash-opt'].forEach(function (id) {
+      document.getElementById(id).style.display = show.indexOf(id) >= 0 ? '' : 'none';
+    });
+  }
+  document.querySelectorAll('input[name=type]').forEach(function (r) { r.addEventListener('change', applyType); });
+  applyType();
+
+  // ===== «По трекеру»: выключает поле километража =====
+  document.getElementById('tracker').addEventListener('change', function (e) {
+    var km = document.getElementById('km');
+    km.disabled = e.target.checked;
+    if (e.target.checked) km.value = '';
+  });
+
+  // ===== Точки =====
+  var pointsBox = document.getElementById('points');
+  function addPointRow() {
+    var sel = el('select', null);
+    STATUSES.forEach(function (s) { sel.append(el('option', { value: s }, s)); });
+    var row = el('div', { 'class': 'ptrow' },
+      el('span', { 'class': 'ptnum' }), sel,
+      el('input', { type: 'text', placeholder: 'Комментарий к точке' }));
+    pointsBox.append(row);
+    renumber();
+  }
+  function renumber() {
+    Array.prototype.forEach.call(pointsBox.children, function (r, i) {
+      r.querySelector('.ptnum').textContent = (i + 1) + '.';
+    });
+    document.getElementById('delPoint').disabled = pointsBox.children.length <= 1;
+  }
+  document.getElementById('addPoint').addEventListener('click', addPointRow);
+  document.getElementById('delPoint').addEventListener('click', function () {
+    if (pointsBox.children.length > 1) pointsBox.lastElementChild.remove();
+    renumber();
+  });
+  addPointRow();
+
+  // ===== Кассы (розница и ОПТ — одинаковые, два независимых списка) =====
+  function makeCash(boxId, addId, delId) {
+    var box = document.getElementById(boxId);
+    function refresh() {
+      var rows = Array.prototype.slice.call(box.children);
+      var used = rows.map(function (r) { return r.querySelector('select').value; });
+      rows.forEach(function (r) {
+        var sel = r.querySelector('select');
+        var cur = sel.value;
+        sel.innerHTML = '';
+        CUR.forEach(function (c) {
+          if (c === cur || used.indexOf(c) === -1) sel.append(el('option', { value: c }, c));
+        });
+        sel.value = cur;
+      });
+      document.getElementById(addId).disabled = rows.length >= CUR.length;
+      document.getElementById(delId).disabled = rows.length <= 1;
+    }
+    function add(cur) {
+      var sel = el('select', null);
+      sel.append(el('option', { value: cur }, cur));
+      sel.addEventListener('change', refresh);
+      box.append(el('div', { 'class': 'currow' }, sel,
+        el('input', { type: 'text', inputmode: 'decimal', placeholder: 'Сумма' })));
+      refresh();
+    }
+    document.getElementById(addId).addEventListener('click', function () {
+      var used = Array.prototype.map.call(box.querySelectorAll('select'), function (s) { return s.value; });
+      var free = CUR.filter(function (c) { return used.indexOf(c) < 0; })[0];
+      if (free) add(free);
+    });
+    document.getElementById(delId).addEventListener('click', function () {
+      if (box.children.length > 1) box.lastElementChild.remove();
+      refresh();
+    });
+    add('BYN');
+    return {
+      rows: function () {
+        return Array.prototype.map.call(box.children, function (r) {
+          return { cur: r.querySelector('select').value, amount: r.querySelector('input').value.trim() };
+        });
+      },
+    };
+  }
+  var cashR = makeCash('cashR', 'addCurR', 'delCurR');
+  var cashO = makeCash('cashO', 'addCurO', 'delCurO');
+
+  // ===== Проверка и отправка =====
+  var msg = document.getElementById('msg');
+  function showMsg(text, bad) {
+    msg.textContent = text;
+    msg.className = bad ? 'msg bad' : 'msg';
+  }
+  function isInt(s) { return /^\d+$/.test(s); }
+  function isSum(s) { return /^\d+([.,]\d+)?$/.test(s); }
+  function badCash(rows) {
+    return rows.some(function (c) { return c.amount !== '' && !isSum(c.amount); });
+  }
+
+  function validate() {
+    var show = SHOW[type()];
+    if (show.indexOf('sec-route') >= 0) {
+      if (!isInt(document.getElementById('route').value.trim()) || +document.getElementById('route').value < 1) {
+        return 'Номер маршрута — целое число больше нуля.';
+      }
+      if (!document.getElementById('tracker').checked &&
+          !isInt(document.getElementById('km').value.trim())) {
+        return 'Укажите километраж (целое число) или поставьте галочку «По трекеру».';
+      }
+    }
+    if (show.indexOf('sec-points') >= 0 && pointsBox.children.length < 1) return 'Добавьте хотя бы одну точку.';
+    if (show.indexOf('sec-cash-retail') >= 0 && badCash(cashR.rows())) {
+      return 'Сумма в кассе розницы — число, например 1500 или 120.50.';
+    }
+    if (show.indexOf('sec-cash-opt') >= 0 && badCash(cashO.rows())) {
+      return 'Сумма в кассе ОПТ — число, например 1500 или 120.50.';
+    }
+    return '';
+  }
+
+  function collect() {
+    var show = SHOW[type()];
+    var data = {
+      action: 'report',
+      uid: (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) ? String(tg.initDataUnsafe.user.id) : '',
+      type: type(),
+      route: '', km: '', tracker: false,
+      points: [], cash: [], optCash: [],
+      comment: document.getElementById('comment').value.trim(),
+    };
+    if (show.indexOf('sec-route') >= 0) {
+      data.route = document.getElementById('route').value.trim();
+      data.tracker = document.getElementById('tracker').checked;
+      data.km = data.tracker ? '' : document.getElementById('km').value.trim();
+    }
+    if (show.indexOf('sec-points') >= 0) {
+      data.points = Array.prototype.map.call(pointsBox.children, function (r) {
+        return { status: r.querySelector('select').value, comment: r.querySelector('input').value.trim() };
+      });
+    }
+    if (show.indexOf('sec-cash-retail') >= 0) {
+      data.cash = cashR.rows().filter(function (c) { return c.amount !== ''; });
+    }
+    if (show.indexOf('sec-cash-opt') >= 0) {
+      data.optCash = cashO.rows().filter(function (c) { return c.amount !== ''; });
+    }
+    return data;
+  }
+
+  document.getElementById('report').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var bad = validate();
+    if (bad) return showMsg(bad, true);
+    var sendBtn = document.getElementById('send');
+    sendBtn.disabled = true;
+    showMsg('Отправляю…');
+    try {
+      // Простой POST без contentType — как окно сверки CRM: браузер не делает предварительную проверку CORS.
+      // Адрес — подставленный doGet-ом …/exec (window.WEB_APP_URL), а не location.href (см. doGet).
+      var res = await fetch(window.WEB_APP_URL || location.href, { method: 'POST', body: JSON.stringify(collect()) });
+      var d = await res.json();
+      if (!d.ok) showMsg('⚠️ ' + (d.error || 'Бот не ответил'), true);
+      else {
+        showMsg('✅ Отчёт отправлен.');
+        setTimeout(function () { if (tg) tg.close(); }, 1200);
+      }
+    } catch (err) {
+      showMsg('⚠️ Не удалось отправить: ' + err.message, true);
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
