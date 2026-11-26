@@ -206,7 +206,12 @@ const BOT_TXT = {
   askName: 'Здравствуйте! Напишите, пожалуйста, фамилию и имя, например: Иванов Иван',
   badName: 'Напишите фамилию и имя через пробел, например: Иванов Иван',
   sent: 'Заявка отправлена, ждите подтверждения.',
-  accepted: '✅ Вы подключены. Сюда будут приходить копии ваших отчётов.',
+  help: 'Инструкция чата:\n' +
+    '1. Сюда будут приходить копии ваших отчётов.\n' +
+    '2. Сюда будут приходить оповещения о завершении маршрутов.\n' +
+    '3. В этом чате можно вести переписку с принимающим отчёты.\n' +
+    '4. Все сообщения доходят до второй стороны с задержкой до 1 минуты — будьте терпеливы.\n' +
+    '5. Напишите /start, если захотите снова увидеть эту инструкцию.',
   rejected: '❌ Заявка отклонена.',
   start: 'Чтобы подключиться к боту, нажмите /start',
   noCmd: 'Такой команды я не знаю. Просто напишите сообщение — я передам его в группу.',
@@ -225,7 +230,7 @@ function botOnDriverMessage_(m, text, ss) {
 
   if (/^\/start(\s|$)/.test(text)) {
     if (me && me.status === BOT_ST.active) {
-      botTellDriver_(ss, id, 'Вы уже подключены: <b>' + esc_(botFullName_(me)) + '</b>.');
+      botTellDriver_(ss, id, 'Вы уже подключены: <b>' + esc_(botFullName_(me)) + '</b>.\n\n' + BOT_TXT.help);
     } else if (me && me.status === BOT_ST.pending) {
       botTellDriver_(ss, id, BOT_TXT.sent);
     } else {
@@ -373,7 +378,7 @@ function botOnButton_(q, ss) {
     d.date = new Date();
     botSaveDriver_(ss, d);
     try {
-      botTellDriver_(ss, d.id, d.status === BOT_ST.active ? BOT_TXT.accepted : BOT_TXT.rejected);
+      botTellDriver_(ss, d.id, d.status === BOT_ST.active ? '✅ Вы подключены!\n\n' + BOT_TXT.help : BOT_TXT.rejected);
     } catch (e) {
       note += ' (водителю не доставлено: ' + e.message + ')';
     }
