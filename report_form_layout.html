@@ -3,7 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<script>window.WEB_APP_URL = "<?= webAppUrl ?>";</script>
+<script>
+// Кто отправляет отчёт: Telegram ID водителя из адреса кнопки (?d=, вшит doGet-ом).
+// Telegram initDataUnsafe не используется — он пуст в песочной iframe-обёртке Apps Script.
+window.WEB_APP_URL = "<?= webAppUrl ?>";
+window.WEB_APP_UID = "<?= uid ?>";
+</script>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root {
@@ -285,7 +290,7 @@
     var show = SHOW[type()];
     var data = {
       action: 'report',
-      uid: (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) ? String(tg.initDataUnsafe.user.id) : '',
+      uid: window.WEB_APP_UID || '',
       type: type(),
       route: '', km: '', tracker: false,
       points: [], cash: [], optCash: [],

@@ -235,7 +235,7 @@ function botOnDriverMessage_(m, text, ss) {
       botTellDriver_(ss, id, 'Вы уже подключены: <b>' + esc_(botFullName_(me)) + '</b>.\n\n' + BOT_TXT.help);
       if (typeof botReportKeyboard_ === 'function') {
         try {
-          botSend_(id, 'Заполнить и отправить отчёт можно кнопкой ниже 👇', botReportKeyboard_());
+          botSend_(id, 'Заполнить и отправить отчёт можно кнопкой ниже 👇', botReportKeyboard_(me));
         } catch (e) {
           console.error('Бот: кнопка «Создать отчёт» не отправлена: ' + (e.stack || e.message));
         }
@@ -393,7 +393,7 @@ function botOnButton_(q, ss) {
     }
     if (d.status === BOT_ST.active && typeof botReportKeyboard_ === 'function') {
       try {
-        botSend_(d.id, 'Заполнить и отправить отчёт можно кнопкой ниже 👇', botReportKeyboard_());
+        botSend_(d.id, 'Заполнить и отправить отчёт можно кнопкой ниже 👇', botReportKeyboard_(d));
       } catch (e2) {
         note += ' (кнопка отчёта не доставлена: ' + e2.message + ')';
       }

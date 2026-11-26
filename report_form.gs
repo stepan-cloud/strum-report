@@ -11,7 +11,13 @@
  *                            script.googleusercontent.com — тот на POST отвечает HTML-страницей.
  *   botReportFromWeb_(q)   — принимает заполненную форму (doPost, action 'report'), собирает отчёт
  *                            и шлёт его в группу + копию водителю через sendReport_ (telegram_report.gs).
- *   botReportKeyboard_()   — Reply-клавиатура с кнопкой «Создать отчёт» (открывает форму).
+ *   botReportKeyboard_(d)  — Reply-клавиатура с кнопкой «Создать отчёт» (открывает форму).
+ *
+ * Кто отправил отчёт: кнопка каждого водителя открывает форму с ?d=<его Telegram ID> в адресе —
+ * бот подставляет ID при отправке кнопки, doGet вшивает его в форму, форма возвращает вместе с данными.
+ * Telegram initDataUnsafe НЕ используется: страница Apps Script живёт в песочной iframe-обёртке Google,
+ * telegram-web-app.js в ней не инициализируется, initDataUnsafe пустой (из-за этого первые отчёты шли
+ * «Без имени»). Защита — как у самой кнопки: кто видит кнопку в своём чате с ботом, тот и водитель.
  *   botGiveReportButton()  — вручную: прислать кнопку и объявление ВСЕМ подключённым водителям.
  *
  * Порядок установки:
@@ -30,35 +36,39 @@ const REPORT_CUR = ['BYN', 'USD', 'EUR', 'RUB'];
 
 /** Форма отчёта: Telegram открывает её по кнопке web_app. HTML-файл назван иначе,
  *  потому что Apps Script не даёт HTML-файлу имя, совпадающее с файлом скрипта (report_form.gs).
- *  Форма — шаблон: в неё подставляется webAppUrl — POST с данными принимается ТОЛЬКО по адресу …/exec,
- *  а location.href после редиректа Apps Script указывает на script.googleusercontent.com — тот на POST
- *  отвечает HTML-страницей, и отправка падает с «Unexpected token <». */
-function doGet() {
+ *  Форма — шаблон: в неё подставляются webAppUrl (POST принимается ТОЛЬКО по адресу …/exec — location.href
+ *  после редиректа Apps Script указывает на script.googleusercontent.com, тот на POST отвечает HTML-страницей)
+ *  и uid водителя из параметра ?d= адреса кнопки. */
+function doGet(e) {
   const t = HtmlService.createTemplateFromFile('report_form_layout');
   t.webAppUrl = ScriptApp.getService().getUrl();  // адрес …/exec текущего развёртывания
+  const d = e && e.parameter ? String(e.parameter.d || '') : '';
+  t.uid = /^\d+$/.test(d) ? d : '';  // Telegram ID водителя, чья кнопка открыла форму
   return t.evaluate()
     .setTitle('Отчёт по маршруту')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
-/** Reply-клавиатура с кнопкой «Создать отчёт» для тестовых водителей. */
-function botReportKeyboard_() {
+/** Reply-клавиатура с кнопкой «Создать отчёт» для водителя driver.
+ *  Кнопка открывает форму с ?d=<Telegram ID> — по нему форма узнаёт, кто отправляет отчёт.
+ *  Без driver — без параметра (тогда форма примет отчёт только с непустым uid, см. botReportFromWeb_). */
+function botReportKeyboard_(driver) {
   const url = String(PropertiesService.getScriptProperties().getProperty(BOT_P.webApp) || '').trim();
   if (!url) {
     throw new Error('Не задано свойство скрипта BOT_WEBAPP_URL — разверните веб-приложение (см. driver_bot.gs) ' +
       'и впишите адрес …/exec.');
   }
-  return { keyboard: [[{ text: 'Создать отчёт', web_app: { url: url } }]], resize_keyboard: true };
+  const u = driver && /^\d+$/.test(String(driver.id)) ? url + '?d=' + driver.id : url;
+  return { keyboard: [[{ text: 'Создать отчёт', web_app: { url: u } }]], resize_keyboard: true };
 }
 
 /** Вручную: прислать кнопку «Создать отчёт» и объявление ВСЕМ подключённым водителям. */
 function botGiveReportButton() {
-  const kb = botReportKeyboard_();
   const drivers = botDrivers_(botBook_()).filter(d => d.status === BOT_ST.active);
   if (!drivers.length) throw new Error('Подключённых водителей нет.');
   drivers.forEach(d => {
     try {
-      botSend_(d.id, 'Теперь через этот чат можно создать новый отчёт.', kb);
+      botSend_(d.id, 'Теперь через этот чат можно создать новый отчёт.', botReportKeyboard_(d));
       console.log('Отправлено: ' + botFullName_(d) + ' (' + d.id + ')');
     } catch (e) {
       console.error('Не отправлено, ' + botFullName_(d) + ' (' + d.id + '): ' + (e.stack || e.message));
@@ -76,15 +86,14 @@ function botReportFromWeb_(q, step) {
   const uid = String(q.uid || '').trim();
   const ss = botBook_();
   const drivers = botDrivers_(ss);
-  // Отправить отчёт может только подключённый водитель, открывший форму кнопкой из чата с ботом.
-  // Пустой uid — только отладка формы в браузере вне Telegram: отчёт уйдёт, но без ФИО
-  // (копию назначит админ командой /водитель ответом на отчёт).
-  let driver = null;
-  if (uid) {
-    driver = drivers.find(d => d.id === uid);
-    if (!driver || driver.status !== BOT_ST.active) {
-      return { ok: false, error: 'Вы не подключены к боту — напишите ему /start.' };
-    }
+  // Кто отправил: Telegram ID из адреса кнопки (?d=). Пустой — форму открыли не кнопкой
+  // (например, в браузере по адресу …/exec): отчёт без имени не принимаем.
+  if (!uid) {
+    return { ok: false, error: 'Откройте форму кнопкой «Создать отчёт» в чате с ботом — тогда отчёт будет с вашим именем.' };
+  }
+  const driver = drivers.find(d => d.id === uid);
+  if (!driver || driver.status !== BOT_ST.active) {
+    return { ok: false, error: 'Вы не подключены к боту — напишите ему /start.' };
   }
 
   // --- Тип
@@ -164,10 +173,9 @@ function botReportFromWeb_(q, step) {
   if (general) commentParts.push(general);
   const comment = commentParts.join('\n');
 
-  // --- ФИО водителя (driver найден выше по uid; при отладке формы вне Telegram — пусто,
-  //     копию назначит админ командой /водитель ответом на отчёт)
+  // --- ФИО водителя (driver найден выше по uid из адреса кнопки)
   step('имя');
-  const name = driver ? botFullName_(driver) : '';
+  const name = botFullName_(driver);
 
   step('отправка');
   sendReport_({
