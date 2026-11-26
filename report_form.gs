@@ -167,6 +167,7 @@ function botReportFromWeb_(q, step) {
   // --- ФИО водителя (driver найден выше по uid; при отладке формы вне Telegram — пусто,
   //     копию назначит админ командой /водитель ответом на отчёт)
   step('имя');
+  const name = driver ? botFullName_(driver) : '';
 
   step('отправка');
   sendReport_({
