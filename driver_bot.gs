@@ -5,6 +5,7 @@
  * Этап 4: «маршрут завершён» с итогом водителю — его присылает окно сверки в CRM через веб-приложение (doPost).
  * Этап 5: переписка: сообщения водителя уходят в группу (ответом на его последний отчёт), ответы из группы —
  *   водителю (ответом на его копию отчёта); /водитель с текстом шлёт водителю сообщение.
+ *   Успешная отправка водителю помечается реакцией 💯 на вашем сообщении в группе.
  * Этап 6: очистка (раз в час, по BOT_NEXT_DUE): в личных чатах водителей удаляются ВСЕ сообщения старше ~47 ч
  *   (Telegram даёт боту удалять в личке только моложе 48 ч), в админ-чате — ничего; строки «Сообщений»
  *   и «Журнала» старше ~месяца стираются.
@@ -545,6 +546,7 @@ function botOnDriverCmd_(m, arg, ss) {
       reply('⚠️ Не доставлено: ' + name + ' — ' + esc_(e.message));
       return;
     }
+    botReact_(m.chat.id, m.message_id);  // 💯 — доставлено водителю
     reply('✅ ' + name + ': ' + esc_(msg));
     return;
   }
@@ -706,6 +708,7 @@ function botOnAdminReply_(m, ss) {
   }
   try {
     botPassToDriver_(ss, driver, m, repId, route);
+    botReact_(m.chat.id, m.message_id);  // 💯 — доставлено водителю
   } catch (e) {
     answer('⚠️ Не доставлено: <b>' + esc_(botFullName_(driver)) + '</b> — ' + esc_(e.message));
   }
@@ -873,12 +876,7 @@ function botRouteDone_(q, step) {
     botSaveMessage_(ss, { chat: driver.id, id: String(sentId), route: route, report: report.id,
       driver: driver.id, date: new Date(), deleted: '', kind: kind });
     step('отметка в группе');
-    try {
-      botApi_('setMessageReaction', {
-        chat_id: admin, message_id: Number(report.id),
-        reaction: [{ type: 'emoji', emoji: '💯' }],
-      });
-    } catch (e) { /* водителю уже ушло — отметка в группе не главное */ }
+    botReact_(admin, report.id);
     return { ok: true, driver: name, sum: sum };
   } finally {
     if (locked) lock.releaseLock();
@@ -1289,6 +1287,16 @@ function botReply_(chatId, replyTo, html) {
   return botSend_(chatId, html, null, {
     reply_parameters: { message_id: Number(replyTo), allow_sending_without_reply: true },
   });
+}
+
+/** Реакция 💯 на сообщение — «доставлено водителю». Ошибку не бросает: сообщение важнее отметки. */
+function botReact_(chatId, msgId) {
+  try {
+    botApi_('setMessageReaction', {
+      chat_id: chatId, message_id: Number(msgId),
+      reaction: [{ type: 'emoji', emoji: '💯' }],
+    });
+  } catch (e) { /* отметка не главное */ }
 }
 
 /** Заменяет текст и кнопки сообщения бота. */
